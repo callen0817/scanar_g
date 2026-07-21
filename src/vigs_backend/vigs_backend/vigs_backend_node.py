@@ -5,7 +5,7 @@ from sensor_msgs.msg import Image, Imu
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32
-from scanar_interfaces.msg import ScanConfidence, GaussianSplat, GaussianSplatArray
+from scanar_interfaces.msg import ScanConfidence, GaussianSplat, GaussianSplatArray, SystemHealth
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
@@ -38,6 +38,7 @@ class VigsBackendNode(Node):
         self.conf_pub = self.create_publisher(Float32, '/scanar/scan_confidence', 10)
         self.conf_breakdown_pub = self.create_publisher(ScanConfidence, '/scanar/scan_confidence_breakdown', 10)
         self.status_pub = self.create_publisher(String, '/vigs/status', 10)
+        self.health_pub = self.create_publisher(SystemHealth, '/scanar/diagnostics/system_health', 10)
 
         # State database
         self.current_pose = None
@@ -178,6 +179,38 @@ class VigsBackendNode(Node):
         if self.active_dir:
             self.all_splats = []  # Reset for new capture session
 
+    def get_cpu_temp(self):
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                return float(f.read().strip()) / 1000.0
+        except:
+            return 45.0
+
+    def get_mem_usage(self):
+        try:
+            with open("/proc/meminfo", "r") as f:
+                lines = f.readlines()
+            total = 0
+            free = 0
+            for line in lines:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    free = int(line.split()[1])
+            if total > 0:
+                return (total - free) / total * 100.0
+        except:
+            pass
+        return 35.0
+
+    def get_cpu_load(self):
+        try:
+            with open("/proc/loadavg", "r") as f:
+                load = float(f.read().split()[0])
+            return min(100.0, (load / 6.0) * 100.0)
+        except:
+            return 25.0
+
     def periodic_publish(self):
         # 1. Publish active splats
         msg = GaussianSplatArray()
@@ -209,6 +242,13 @@ class VigsBackendNode(Node):
         breakdown.cpu = 45.0
         breakdown.memory = 30.0
         self.conf_breakdown_pub.publish(breakdown)
+
+        # 5. Publish System Health
+        health_msg = SystemHealth()
+        health_msg.cpu_load = float(self.get_cpu_load())
+        health_msg.memory_usage = float(self.get_mem_usage())
+        health_msg.cpu_temperature = float(self.get_cpu_temp())
+        self.health_pub.publish(health_msg)
 
     def export_gaussian_pipeline(self):
         self.get_logger().info(f"VIGS SLAM Export Pipeline triggered. Target: {self.active_dir}")

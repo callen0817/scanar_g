@@ -4,7 +4,7 @@ hud_renderer.py — ScanAR G Production HUD Renderer
 ======================================================
 ROS2 node that receives live telemetry and renders the operator HUD
 to the connected VITURE glasses display at 60 Hz using OpenCV.
-Features a 3D Gaussian Splat viewer running in real-time.
+Features a 3D Gaussian Splat viewer and a real-time 2D floor plan minimap.
 """
 
 import os
@@ -12,13 +12,16 @@ import cv2
 import numpy as np
 import math
 import time
+import json
 import collections
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool, Float32
 from nav_msgs.msg import Odometry
-from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray
+from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, SystemHealth
+
+from hud_widgets.keyplan import KeyplanWidget
 
 # Display constants
 WIDTH, HEIGHT = 1920, 1080
@@ -38,8 +41,90 @@ C_EDGE  = ( 50, 185, 205)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
+# Keyplan geometry — bottom-right corner
+KP_W = 340
+KP_H = 300
+KP_X = WIDTH  - KP_W - 24
+KP_Y = HEIGHT - KP_H - 60
+
+LAT_HIST = collections.deque(maxlen=100)
+
 def _blink(ca, cb, hz=1.0):
     return ca if math.sin(time.time() * hz * 2 * math.pi) > 0 else cb
+
+def _lat_color(ms):
+    return C_GREEN if ms < 33 else (C_AMBER if ms < 50 else C_RED)
+
+def _hbar(frame, x, y, w, h, val, maxv, col):
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (30, 30, 30), -1)
+    fill = int(w * min(val, maxv) / maxv)
+    if fill > 0:
+        cv2.rectangle(frame, (x, y), (x + fill, y + h), col, -1)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), C_DIM, 1)
+
+def _panel(frame, x, y, w, h, alpha=0.82):
+    ov = frame.copy()
+    cv2.rectangle(ov, (x, y), (x + w, y + h), C_PANEL, -1)
+    cv2.addWeighted(ov, alpha, frame, 1 - alpha, 0, frame)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), C_EDGE, 1)
+
+def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, splats):
+    EX, EY, EW, EH = 20, 56, 360, 500
+    _panel(frame, EX, EY, EW, EH)
+    cv2.putText(frame, "ENGINEERING STATUS", (EX + 10, EY + 18),
+                FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
+    y = EY + 40
+
+    def row(lbl, val, col=C_WHITE):
+        nonlocal y
+        cv2.putText(frame, lbl,  (EX + 14, y), FONT, 0.37, C_DIM,  1, cv2.LINE_AA)
+        cv2.putText(frame, val,  (EX + 185, y), FONT, 0.39, col,    1, cv2.LINE_AA)
+        y += 24
+
+    def bar(lbl, val, maxv, col):
+        nonlocal y
+        cv2.putText(frame, lbl, (EX + 14, y), FONT, 0.37, C_DIM, 1, cv2.LINE_AA)
+        _hbar(frame, EX + 110, y - 13, EW - 138, 13, val, maxv, col)
+        cv2.putText(frame, f"{val:.0f}", (EX + EW - 42, y),
+                    FONT, 0.34, col, 1, cv2.LINE_AA)
+        y += 26
+
+    cpu_c = C_GREEN if cpu < 60 else (C_AMBER if cpu < 85 else C_RED)
+    row("CPU LOAD",   f"{cpu:.0f}%",  cpu_c)
+    bar("",           cpu, 100,       cpu_c)
+
+    ram_c = C_GREEN if ram < 70 else C_AMBER
+    row("RAM",        f"{ram:.0f}%",  ram_c)
+    bar("",           ram, 100,       ram_c)
+
+    tmp_c = C_GREEN if temp < 65 else (C_AMBER if temp < 78 else C_RED)
+    row("CPU TEMP",   f"{temp:.0f}°C", tmp_c)
+    bar("",           temp, 100,       tmp_c)
+
+    y += 6
+    row("LATENCY",    f"{lat_ms:.1f} ms", _lat_color(lat_ms))
+    row("CONFIDENCE", f"{confidence:.0f}%",
+        C_GREEN if confidence >= 80 else C_AMBER)
+    row("GAUSSIANS",  f"{splats:,}",   C_WHITE)
+
+    y += 8
+    if len(LAT_HIST) > 2:
+        gx, gy, gw, gh = EX + 14, y, EW - 28, 75
+        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (18, 18, 18), -1)
+        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), C_DIM, 1)
+        vals = list(LAT_HIST)
+        maxv = max(60, max(vals))
+        t33y = gy + gh - int((33.0 / maxv) * gh)
+        cv2.line(frame, (gx, t33y), (gx + gw, t33y), C_GREEN, 1)
+        cv2.putText(frame, "33ms", (gx + 3, t33y - 2), FONT, 0.28, C_GREEN, 1)
+        pts = [(gx + int(i * gw / len(vals)),
+                gy + gh - int((v / maxv) * gh))
+               for i, v in enumerate(vals)]
+        for i in range(1, len(pts)):
+            cv2.line(frame, pts[i - 1], pts[i],
+                     _lat_color(vals[i]), 1, cv2.LINE_AA)
+        cv2.putText(frame, "LATENCY HISTORY", (gx, gy - 3),
+                    FONT, 0.28, C_DIM, 1)
 
 class HudRenderer(Node):
     def __init__(self):
@@ -52,12 +137,25 @@ class HudRenderer(Node):
         self.vigs_status = "INITIALIZING"
         self.gaussian_count = 0
         self.active_dir = ""
+        
+        # System health metrics
+        self.cpu_load = 0.0
+        self.ram_pct = 0.0
+        self.cpu_temp = 0.0
+        self.latency_ms = 0.0
+        self.show_eng = False
+        self.dist_m = 0.0
+        self.calib_ok = True  # visual-inertial tracking defaults to ready
+        
         self._t_start = time.time()
 
         # Visual mode (1: Natural RGB, 2: ScanAR Green, 3: Hybrid)
         self.visual_mode = 1
 
-        # Camera Intrinsics (same as vigs_backend for consistent projection)
+        # Keyplan widget — maps the real-time floor plan
+        self.keyplan = KeyplanWidget()
+
+        # Camera Intrinsics
         self.fx = 960.0 # scaled for 1920x1080
         self.fy = 960.0
         self.cx = WIDTH / 2.0
@@ -66,7 +164,6 @@ class HudRenderer(Node):
         # Current pose
         self.pose_pos = np.array([0.0, 0.0, 0.0])
         self.pose_rot_mat = np.eye(3)
-        self.trajectory = []
 
         # Current 3D Gaussian splats
         self.splat_positions = np.zeros((0, 3), dtype=np.float32)
@@ -82,6 +179,9 @@ class HudRenderer(Node):
         self.create_subscription(Float32, '/viture/camera/fps', self._cb_fps, 10)
         self.create_subscription(Float32, '/viture/imu/rate', self._cb_imu_rate, 10)
         self.create_subscription(String, '/scanar/session/active_directory', self._cb_active_dir, 10)
+        self.create_subscription(SystemHealth, '/scanar/diagnostics/system_health', self._cb_health, 10)
+        self.create_subscription(String, '/scanar/diagnostics/latency_report', self._cb_latency, 10)
+        self.create_subscription(Bool, '/scanar/hud/eng_mode', self._cb_eng, 10)
 
         self.get_logger().info("ScanAR G HUD Renderer Node Initialized.")
 
@@ -89,18 +189,22 @@ class HudRenderer(Node):
         tx = msg.pose.pose.position.x
         ty = msg.pose.pose.position.y
         tz = msg.pose.pose.position.z
+        
+        # Calculate yaw heading from quaternion
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+        # Calculate distance
+        if len(self.keyplan._trajectory) > 0:
+            self.dist_m += math.hypot(tx - self.pose_pos[0], ty - self.pose_pos[1])
+
         self.pose_pos = np.array([tx, ty, tz])
+        self.pose_rot_mat = self.quat_to_rot(q.w, q.x, q.y, q.z)
 
-        qw = msg.pose.pose.orientation.w
-        qx = msg.pose.pose.orientation.x
-        qy = msg.pose.pose.orientation.y
-        qz = msg.pose.pose.orientation.z
-        self.pose_rot_mat = self.quat_to_rot(qw, qx, qy, qz)
-
-        # Accumulate trajectory (x, y) for minimap / stats
-        self.trajectory.append((tx, ty))
-        if len(self.trajectory) > 5000:
-            self.trajectory.pop(0)
+        # Update pose in floor plan keyplan
+        self.keyplan.update_pose(tx, ty, yaw)
 
     def _cb_splats(self, msg: GaussianSplatArray):
         self.gaussian_count = len(msg.splats)
@@ -116,16 +220,21 @@ class HudRenderer(Node):
         colors = []
         scales = []
         opacities = []
+        map_points_2d = []
         for s in msg.splats:
             positions.append([s.x, s.y, s.z])
             colors.append([int(s.b), int(s.g), int(s.r)]) # BGR for OpenCV
             scales.append(s.scale)
             opacities.append(s.opacity)
+            map_points_2d.append((s.x, s.y))
 
         self.splat_positions = np.array(positions, dtype=np.float32)
         self.splat_colors = np.array(colors, dtype=np.uint8)
         self.splat_scales = np.array(scales, dtype=np.float32)
         self.splat_opacities = np.array(opacities, dtype=np.float32)
+
+        # Feed splat 2D coordinates into the real-time floor plan keyplan
+        self.keyplan.update_map_points(map_points_2d)
 
     def _cb_confidence(self, msg: Float32):
         self.confidence = msg.data
@@ -142,18 +251,29 @@ class HudRenderer(Node):
     def _cb_active_dir(self, msg: String):
         self.active_dir = msg.data
 
+    def _cb_health(self, msg: SystemHealth):
+        self.cpu_load = msg.cpu_load
+        self.ram_pct = msg.memory_usage
+        self.cpu_temp = msg.cpu_temperature
+
+    def _cb_latency(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            self.latency_ms = float(data.get("latency_profile_ms", {}).get("total_pipeline_latency_ms", 0.0))
+            LAT_HIST.append(self.latency_ms)
+        except Exception:
+            pass
+
+    def _cb_eng(self, msg: Bool):
+        self.show_eng = msg.data
+
     def draw(self, frame: np.ndarray) -> None:
         # Clear screen to BG_COLOR
         frame[:] = BG_COLOR
 
         # 1. Project and render 3D Gaussian Splats if available
         if len(self.splat_positions) > 0:
-            # Transform splats to camera frame
-            # P_cam = R_cam^T * (P_world - t_cam)
             rel_pos = self.splat_positions - self.pose_pos
-            # Matrix multiplication to transform all points: P_cam = rel_pos @ R_cam
-            # Since R_cam is the orientation of the camera/head, the inverse transform is R_cam^T
-            # So rel_pos @ R_cam translates to multiplying by R_cam matrix.
             p_cam = rel_pos @ self.pose_rot_mat
 
             # Filter points in front of the camera (Z_cam > 0.1)
@@ -196,11 +316,10 @@ class HudRenderer(Node):
                             color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
                         elif self.visual_mode == 2:
                             # ScanAR Green Mode
-                            # Map green intensity to confidence
                             intensity = int(120 + 135 * (self.confidence / 100.0))
                             color = (50, intensity, 50)
                         else:
-                            # Hybrid Mode (RGB splats + green confidence halo)
+                            # Hybrid Mode
                             color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
 
                         # Draw splat
@@ -208,10 +327,9 @@ class HudRenderer(Node):
                             # Draw outer confidence green ring
                             cv2.circle(frame, (px, py), r_pix + 2, (30, 180, 50), 1, cv2.LINE_AA)
                         
-                        # Filled circle
                         cv2.circle(frame, (px, py), r_pix, color, -1, cv2.LINE_AA)
 
-        # 2. Render Top Strip Dashboard
+        # 2. Render Top Strip Dashboard (Same as ScanAR Dual, but labeled ScanAR G)
         ov = frame.copy()
         cv2.rectangle(ov, (0, 0), (WIDTH, 44), C_PANEL, -1)
         cv2.addWeighted(ov, 0.78, frame, 0.22, 0, frame)
@@ -222,50 +340,64 @@ class HudRenderer(Node):
         cv2.circle(frame, (24, 22), 9, rec_col, -1)
         cv2.putText(frame, "REC" if self.active_dir else "STBY", (40, 28), FONT, 0.46, rec_col, 1, cv2.LINE_AA)
 
-        # Mode tag
-        mode_str = ["NATURAL RGB", "SCANAR GREEN", "HYBRID OVERLAY"][self.visual_mode - 1]
-        cv2.putText(frame, f"MODE: {mode_str}", (120, 28), FONT, 0.44, C_CYAN, 1, cv2.LINE_AA)
+        # Tracking status
+        trk_txt = "TRACKING" if self.confidence >= 80 else "DEGRADED"
+        trk_col = C_GREEN if self.confidence >= 80 else _blink(C_AMBER, C_DIM, hz=1.5)
+        cv2.circle(frame, (118, 22), 6, trk_col, -1)
+        cv2.putText(frame, trk_txt, (132, 28), FONT, 0.44, trk_col, 1, cv2.LINE_AA)
 
         # Title
-        cv2.putText(frame, "ScanAR  G", (WIDTH // 2 - 50, 29), FONT, 0.52, C_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(frame, "SCANAR  G", (WIDTH // 2 - 72, 29), FONT, 0.52, C_CYAN, 1, cv2.LINE_AA)
 
-        # Stats strip
-        stats_str = f"CAM {self.camera_fps:.1f} FPS  ·  IMU {self.imu_rate_hz:.0f} Hz  ·  SPLATS {self.gaussian_count:,}  ·  VIGS: {self.vigs_status}"
-        sw, _ = cv2.getTextSize(stats_str, FONT, 0.44, 1)[0]
-        cv2.putText(frame, stats_str, (WIDTH - sw - 200, 28), FONT, 0.44, C_WHITE, 1, cv2.LINE_AA)
+        # Calibration state
+        calib_txt = "CALIB ✓" if self.calib_ok else "CALIB —"
+        calib_col = C_GREEN if self.calib_ok else C_DIM
+        cv2.putText(frame, calib_txt, (WIDTH // 2 + 100, 29), FONT, 0.40, calib_col, 1, cv2.LINE_AA)
 
-        # Quality indicator
-        qual_col = C_GREEN if self.confidence >= 80 else (C_AMBER if self.confidence >= 50 else C_RED)
-        cv2.circle(frame, (WIDTH - 150, 22), 6, qual_col, -1)
-        cv2.putText(frame, f"QUALITY {self.confidence:.0f}%", (WIDTH - 135, 28), FONT, 0.44, qual_col, 1, cv2.LINE_AA)
+        # Latency & Distance
+        lat_txt = f"LAT {self.latency_ms:.0f}ms   {self.dist_m:.0f}m"
+        lw, _ = cv2.getTextSize(lat_txt, FONT, 0.44, 1)[0]
+        cv2.putText(frame, lat_txt, (WIDTH - lw - 20, 28), FONT, 0.44, C_WHITE, 1, cv2.LINE_AA)
 
-        # 3. Mode Help Panel (Bottom-Left)
-        b_panel_w, b_panel_h = 360, 100
+        # 3. Real-Time 2D Floor Plan minimap (Bottom-right corner)
+        self.keyplan.draw(frame, KP_X, KP_Y, KP_W, KP_H)
+
+        # 4. Mode Help Panel (Bottom-Left)
+        b_panel_w, b_panel_h = 360, 115
         _panel_x, _panel_y = 20, HEIGHT - b_panel_h - 60
         ov_b = frame.copy()
         cv2.rectangle(ov_b, (_panel_x, _panel_y), (_panel_x + b_panel_w, _panel_y + b_panel_h), C_PANEL, -1)
         cv2.addWeighted(ov_b, 0.8, frame, 0.2, 0, frame)
         cv2.rectangle(frame, (_panel_x, _panel_y), (_panel_x + b_panel_w, _panel_y + b_panel_h), C_EDGE, 1)
 
-        cv2.putText(frame, "CONTROLS & SHORTCUTS", (_panel_x + 10, _panel_y + 20), FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(frame, "HUD CONTROLS", (_panel_x + 10, _panel_y + 20), FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
         cv2.putText(frame, "[1] Natural RGB Mode", (_panel_x + 15, _panel_y + 40), FONT, 0.36, C_WHITE if self.visual_mode == 1 else C_DIM, 1, cv2.LINE_AA)
         cv2.putText(frame, "[2] ScanAR Green Mode", (_panel_x + 15, _panel_y + 60), FONT, 0.36, C_WHITE if self.visual_mode == 2 else C_DIM, 1, cv2.LINE_AA)
         cv2.putText(frame, "[3] Hybrid View Mode", (_panel_x + 15, _panel_y + 80), FONT, 0.36, C_WHITE if self.visual_mode == 3 else C_DIM, 1, cv2.LINE_AA)
+        cv2.putText(frame, "[E] Toggle Engineering Overlay", (_panel_x + 15, _panel_y + 100), FONT, 0.36, C_WHITE if self.show_eng else C_DIM, 1, cv2.LINE_AA)
 
-        # 4. Warnings overlay (if tracking is lost / poor)
+        # 5. Engineering Overlay (Left side)
+        if self.show_eng:
+            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.gaussian_count)
+            cv2.putText(frame, "[ENG MODE ON]", (20, HEIGHT - 50), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+
+        # 6. Warnings overlay (if tracking is lost / poor)
         if self.confidence < 70:
             wc = _blink(C_AMBER, C_DIM, hz=1.2)
-            cv2.putText(frame, "⚠  TRACKING QUALITY DEGRADED — ROTATE HEAD SLOWLY",
-                        (WIDTH // 2 - 380, HEIGHT // 2), FONT, 0.75, wc, 2, cv2.LINE_AA)
+            cv2.putText(frame, "⚠  SLAM QUALITY DEGRADED — SLOW DOWN",
+                        (WIDTH // 2 - 290, HEIGHT // 2), FONT, 0.75, wc, 2, cv2.LINE_AA)
+        if self.cpu_temp > 78:
+            cv2.putText(frame, "⚠  HIGH TEMPERATURE",
+                        (WIDTH // 2 - 160, HEIGHT // 2 + 50), FONT, 0.65, _blink(C_RED, C_DIM), 2, cv2.LINE_AA)
 
-        # 5. Bottom Status Bar
+        # 7. Bottom Status Bar
         bov = frame.copy()
         cv2.rectangle(bov, (0, HEIGHT - 34), (WIDTH, HEIGHT), C_PANEL, -1)
         cv2.addWeighted(bov, 0.75, frame, 0.25, 0, frame)
         elapsed = time.time() - self._t_start
         ts = time.strftime("%H:%M:%S")
         cv2.putText(frame,
-                    f"ScanAR G Appliance  ·  {ts}  ·  "
+                    f"ScanAR G  ·  {ts}  ·  "
                     f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d} elapsed",
                     (16, HEIGHT - 10), FONT, 0.38, C_DIM, 1, cv2.LINE_AA)
 
@@ -313,6 +445,9 @@ def main(args=None):
             elif key == ord('3'):
                 node.visual_mode = 3
                 node.get_logger().info("HUD Mode set to: HYBRID")
+            elif key in (ord('e'), ord('E')):
+                node.show_eng = not node.show_eng
+                node.get_logger().info(f"HUD Engineering Mode toggled: {node.show_eng}")
     except KeyboardInterrupt:
         pass
     finally:
