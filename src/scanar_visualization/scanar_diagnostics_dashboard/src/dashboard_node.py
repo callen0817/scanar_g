@@ -26,6 +26,10 @@ class DiagnosticsDashboard(Node):
         self.active_dir = "STANDBY"
         self.cam_status = "UNKNOWN"
 
+        # Declare and get product parameter
+        self.declare_parameter('product', 'scanar_g')
+        self.product = self.get_parameter('product').get_parameter_value().string_value
+
         # Subscriptions
         self.create_subscription(String, '/vigs/status', self.cb_status, 10)
         self.create_subscription(Float32, '/viture/camera/fps', self.cb_fps, 10)
@@ -72,9 +76,8 @@ class DiagnosticsDashboard(Node):
         # Clear screen ANSI escape
         os.system('clear')
         
-        imu_display = "OFF" if self.imu_hz == 0.0 else f"{self.imu_hz:.1f} Hz"
-        # Render a beautiful development status layout
-        dashboard = f"""
+        if self.product == "scanar_g":
+            dashboard = f"""
 ===========================================================
                SCANAR G SYSTEM DIAGNOSTICS
 ===========================================================
@@ -83,10 +86,35 @@ class DiagnosticsDashboard(Node):
 
 [-] VITURE SENSOR LAYER:
     - RGB Camera Stream : {self.camera_fps:.1f} FPS ({self.cam_status})
-    - IMU Sampling Rate : {imu_display}
-    - Stereo Stream     : OFF
 
 [-] VIGS SLAM BACKEND:
+    - Backend           : LingBot-Map
+    - Status            : [{self.vigs_status}]
+    - Surface Primitives: {self.gaussian_count:,} pts
+
+[-] PIPELINE LATENCY:
+    - E2E Processing    : {self.pipeline_latency_ms:.2f} ms
+
+[-] QUALITY SCORE:
+    - Tracking Quality  : {self.overall_confidence:.1f} / 100.0
+===========================================================
+"""
+        else:
+            imu_display = "OFF" if self.imu_hz == 0.0 else f"{self.imu_hz:.1f} Hz"
+            dashboard = f"""
+===========================================================
+               {self.product.upper()} SYSTEM DIAGNOSTICS
+===========================================================
+[-] ACTIVE SESSION:
+    - Path              : {self.active_dir}
+
+[-] SENSOR LAYER:
+    - RGB Camera Stream : {self.camera_fps:.1f} FPS ({self.cam_status})
+    - IMU Sampling Rate : {imu_display}
+    - Stereo Stream     : ON
+
+[-] SLAM BACKEND:
+    - Backend           : VIGS-SLAM
     - Status            : [{self.vigs_status}]
     - Gaussian Primitives: {self.gaussian_count:,} splats
 

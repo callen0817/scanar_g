@@ -56,18 +56,19 @@ def launch_setup(context, *args, **kwargs):
 
     # 5. Visualizations HUD & Console Dashboards Layer
     if mode in ['field_test', 'production']:
-        profile_val = LaunchConfiguration('profile').perform(context)
+        product_val = LaunchConfiguration('product').perform(context)
         nodes.append(Node(
             package='viture_hud',
             executable='hud_renderer.py',
             name='hud_renderer',
-            parameters=[{'profile': profile_val}]
+            parameters=[{'product': product_val}]
         ))
         nodes.append(Node(
             package='scanar_diagnostics_dashboard',
             executable='dashboard_node.py',
             name='diagnostics_dashboard',
-            output='screen'
+            output='screen',
+            parameters=[{'product': product_val}]
         ))
 
     return nodes
@@ -78,14 +79,14 @@ def generate_launch_description():
         default_value='production',
         description='Execution mode: hardware, capture, field_test, production'
     )
-    profile_arg = DeclareLaunchArgument(
-        'profile',
-        default_value='glasses',
-        description='Capture profile: glasses, stereo, stereo_imu, lidar, lidar_imu, fusion'
+    product_arg = DeclareLaunchArgument(
+        'product',
+        default_value='scanar_g',
+        description='Capture product: scanar_g, scanar_s, scanar_s2, scanar_l, scanar_l2, scanar_pro'
     )
 
     return LaunchDescription([
         mode_arg,
-        profile_arg,
+        product_arg,
         OpaqueFunction(function=launch_setup)
     ])

@@ -120,15 +120,15 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
         y += 26
 
     profile_label = "SCANAR G (GLASSES)"
-    if profile_name == "stereo":
+    if profile_name == "scanar_s":
         profile_label = "SCANAR S (STEREO)"
-    elif profile_name == "stereo_imu":
+    elif profile_name == "scanar_s2":
         profile_label = "SCANAR S2"
-    elif profile_name == "lidar":
+    elif profile_name == "scanar_l":
         profile_label = "SCANAR L"
-    elif profile_name == "lidar_imu":
+    elif profile_name == "scanar_l2":
         profile_label = "SCANAR L2"
-    elif profile_name == "fusion":
+    elif profile_name == "scanar_pro":
         profile_label = "SCANAR PRO"
 
     row("PROFILE", profile_label, C_CYAN)
@@ -152,12 +152,12 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
 
     y += 4
     # Detailed SLAM stats
-    if profile_name == "glasses":
+    if profile_name == "scanar_g":
         row("BACKEND", "LingBot-Map", C_GREEN)
         row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
         row("SURFACE POINTS", f"{stats_db.get('active_splats', 0)} pts", C_WHITE)
     else:
-        row("BACKEND", "VIGS-SLAM" if "stereo" in profile_name else "FAST-LIO2", C_GREEN)
+        row("BACKEND", "VIGS-SLAM" if "scanar_s" in profile_name else "FAST-LIO2", C_GREEN)
         row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
         row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
         row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_WHITE)
@@ -237,9 +237,9 @@ class HudRenderer(Node):
         self.bridge = CvBridge()
         self.camera_image = None
 
-        # Declare and get profile parameter
-        self.declare_parameter('profile', 'glasses')
-        self.profile = self.get_parameter('profile').get_parameter_value().string_value
+        # Declare and get product parameter
+        self.declare_parameter('product', 'scanar_g')
+        self.product = self.get_parameter('product').get_parameter_value().string_value
 
         # ROS subscriptions
         self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, 10)
@@ -395,7 +395,7 @@ class HudRenderer(Node):
                     for idx in sort_idx:
                         px = int(u_scr[idx])
                         py = int(v_scr[idx])
-                        if self.profile == 'glasses':
+                        if self.product == 'scanar_g':
                             r_pix = 2
                         else:
                             r_pix = int((scale_scr[idx] * self.fx) / z_scr[idx])
@@ -473,7 +473,7 @@ class HudRenderer(Node):
 
         # 5. Engineering Overlay (Left side)
         if self.show_eng:
-            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames, self.profile)
+            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames, self.product)
             cv2.putText(frame, "[ENG MODE ON]", (20, HEIGHT - 50), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
 
         # 6. Warnings overlay
