@@ -2,15 +2,17 @@ import time
 import math
 import numpy as np
 from typing import Tuple
-from .interfaces import ICameraSource, IImuSource, IDepthSource, ITrackingSource
+from .interfaces import ICameraSource, IImuSource, IDepthSource, ITrackingSource, ITimeSource, IRecorder
 
-class MockVitureHAL(ICameraSource, IImuSource, IDepthSource, ITrackingSource):
+class MockVitureHAL(ICameraSource, IImuSource, IDepthSource, ITrackingSource, ITimeSource, IRecorder):
     """
     Mock implementation of the ScanAR HAL interfaces for the VITURE Luma Ultra glasses.
     Generates high-fidelity simulated camera, IMU, depth, and tracking data.
     """
     def __init__(self):
         self.start_time = time.time()
+        self._is_recording = False
+        self._recording_path = ""
         
         # Camera intrinsics
         self.fx = 580.0
@@ -108,6 +110,32 @@ class MockVitureHAL(ICameraSource, IImuSource, IDepthSource, ITrackingSource):
         quat = np.array([qw, qx, qy, qz], dtype=np.float32)
         
         return True, pos, quat, t
+
+    # --- ITimeSource Implementation ---
+    def camera(self) -> float:
+        return time.time()
+
+    def imu(self) -> float:
+        return time.time()
+
+    def pose(self) -> float:
+        return time.time()
+
+    def system(self) -> float:
+        return time.monotonic()
+
+    # --- IRecorder Implementation ---
+    def start_recording(self, destination_directory: str) -> bool:
+        self._is_recording = True
+        self._recording_path = destination_directory
+        return True
+
+    def stop_recording(self) -> bool:
+        self._is_recording = False
+        return True
+
+    def is_recording(self) -> bool:
+        return self._is_recording
 
 def cv2_draw_cross(img, pt, color):
     # Minimal cv2-free drawing helper if cv2 is not imported

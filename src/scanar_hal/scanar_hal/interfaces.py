@@ -71,3 +71,48 @@ class ITrackingSource(ABC):
               - quaternion_orientation: np.array([w, x, y, z])
         """
         pass
+
+
+class ITimeSource(ABC):
+    """
+    Interface for high-precision synchronization and clock query.
+    """
+    @abstractmethod
+    def camera(self) -> float:
+        """Query the latest camera frame hardware/driver timestamp (sec)."""
+        pass
+
+    @abstractmethod
+    def imu(self) -> float:
+        """Query the latest IMU event hardware/driver timestamp (sec)."""
+        pass
+
+    @abstractmethod
+    def pose(self) -> float:
+        """Query the latest tracking/pose update timestamp (sec)."""
+        pass
+
+    @abstractmethod
+    def system(self) -> float:
+        """Query the monotonic reference system clock (sec)."""
+        pass
+
+
+class IRecorder(ABC):
+    """
+    Interface for generic data acquisition, recording, and storage.
+    """
+    @abstractmethod
+    def start_recording(self, destination_directory: str) -> bool:
+        """Start recording incoming sensor telemetry to target path."""
+        pass
+
+    @abstractmethod
+    def stop_recording(self) -> bool:
+        """Stop active telemetry recording and flush buffers."""
+        pass
+
+    @abstractmethod
+    def is_recording(self) -> bool:
+        """Check if recording task is active."""
+        pass
