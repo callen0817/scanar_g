@@ -18,8 +18,10 @@ import collections
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool, Float32
+from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
 from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, SystemHealth
+from cv_bridge import CvBridge
 
 from hud_widgets.keyplan import KeyplanWidget
 
@@ -210,7 +212,11 @@ class HudRenderer(Node):
         self.splat_scales = np.zeros((0,), dtype=np.float32)
         self.splat_opacities = np.zeros((0,), dtype=np.float32)
 
+        self.bridge = CvBridge()
+        self.camera_image = None
+
         # ROS subscriptions
+        self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, 10)
         self.create_subscription(Odometry, '/fast_lio/odometry', self._cb_odom, 10)
         self.create_subscription(GaussianSplatArray, '/vigs/gaussian_splats', self._cb_splats, 10)
         self.create_subscription(Float32, '/scanar/scan_confidence', self._cb_confidence, 10)
@@ -224,6 +230,12 @@ class HudRenderer(Node):
         self.create_subscription(String, '/vigs/statistics', self._cb_stats_json, 10)
 
         self.get_logger().info("ScanAR G V1.5 HUD Renderer Node Initialized.")
+
+    def _cb_image(self, msg: Image):
+        try:
+            self.camera_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as e:
+            pass
 
     def _cb_odom(self, msg: Odometry):
         tx = msg.pose.pose.position.x
@@ -319,8 +331,14 @@ class HudRenderer(Node):
         if dt > 1.5 * (1.0 / 60.0):
             self.dropped_frames += int(dt / (1.0 / 60.0)) - 1
 
-        # Clear screen to BG_COLOR
-        frame[:] = BG_COLOR
+        # Clear screen to BG_COLOR or copy real camera feed
+        if self.visual_mode in (1, 3) and self.camera_image is not None:
+            if self.camera_image.shape[1] == WIDTH and self.camera_image.shape[0] == HEIGHT:
+                np.copyto(frame, self.camera_image)
+            else:
+                cv2.resize(self.camera_image, (WIDTH, HEIGHT), dst=frame)
+        else:
+            frame[:] = BG_COLOR
 
         # 1. Project and render 3D Gaussian Splats
         if len(self.splat_positions) > 0:

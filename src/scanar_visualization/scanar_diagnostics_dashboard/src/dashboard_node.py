@@ -24,6 +24,7 @@ class DiagnosticsDashboard(Node):
         self.pipeline_latency_ms = 0.0
         self.overall_confidence = 0.0
         self.active_dir = "STANDBY"
+        self.cam_status = "UNKNOWN"
 
         # Subscriptions
         self.create_subscription(String, '/vigs/status', self.cb_status, 10)
@@ -33,6 +34,7 @@ class DiagnosticsDashboard(Node):
         self.create_subscription(Float32, '/scanar/scan_confidence', self.cb_confidence, 10)
         self.create_subscription(String, '/scanar/diagnostics/latency_report', self.cb_latency, 10)
         self.create_subscription(String, '/scanar/session/active_directory', self.cb_active_dir, 10)
+        self.create_subscription(String, '/viture/camera/status', self.cb_cam_status, 10)
         
         # Periodic terminal print
         self.create_timer(1.0, self.render_terminal_dashboard)
@@ -60,6 +62,9 @@ class DiagnosticsDashboard(Node):
         except Exception:
             pass
 
+    def cb_cam_status(self, msg):
+        self.cam_status = msg.data
+
     def cb_active_dir(self, msg):
         self.active_dir = msg.data if msg.data else "STANDBY"
 
@@ -77,7 +82,7 @@ class DiagnosticsDashboard(Node):
     - Path              : {self.active_dir}
 
 [-] VITURE SENSOR LAYER:
-    - RGB Camera Stream : {self.camera_fps:.1f} FPS
+    - RGB Camera Stream : {self.camera_fps:.1f} FPS ({self.cam_status})
     - IMU Sampling Rate : {imu_display}
     - Stereo Stream     : OFF
 

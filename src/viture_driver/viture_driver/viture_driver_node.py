@@ -37,6 +37,7 @@ class VitureDriverNode(Node):
         self.pose_pub = self.create_publisher(PoseStamped, '/viture/pose', 10)
         self.fps_pub = self.create_publisher(Float32, '/viture/camera/fps', 10)
         self.imu_hz_pub = self.create_publisher(Float32, '/viture/imu/rate', 10)
+        self.status_pub = self.create_publisher(String, '/viture/camera/status', 10)
 
         # HAL & Hardware configurations
         self.hal = None
@@ -92,6 +93,11 @@ class VitureDriverNode(Node):
                 fps_msg = Float32()
                 fps_msg.data = float(fps)
                 self.fps_pub.publish(fps_msg)
+
+                status_msg = String()
+                status_msg.data = "MOCK" if self.sim_mode else "REAL"
+                self.status_pub.publish(status_msg)
+
                 self.frame_count = 0
                 self.last_fps_time = now
 
