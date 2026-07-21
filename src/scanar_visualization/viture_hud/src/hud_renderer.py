@@ -95,7 +95,7 @@ def _get_gpu_memory():
         pass
     return 3.2, 16.0
 
-def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropped_f):
+def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropped_f, profile_name):
     EX, EY, EW, EH = 20, 56, 360, 520
     _panel(frame, EX, EY, EW, EH)
     cv2.putText(frame, "ENGINEERING STATUS", (EX + 10, EY + 18),
@@ -119,6 +119,21 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
                     FONT, 0.34, col, 1, cv2.LINE_AA)
         y += 26
 
+    profile_label = "SCANAR G (GLASSES)"
+    if profile_name == "stereo":
+        profile_label = "SCANAR S (STEREO)"
+    elif profile_name == "stereo_imu":
+        profile_label = "SCANAR S2"
+    elif profile_name == "lidar":
+        profile_label = "SCANAR L"
+    elif profile_name == "lidar_imu":
+        profile_label = "SCANAR L2"
+    elif profile_name == "fusion":
+        profile_label = "SCANAR PRO"
+
+    row("PROFILE", profile_label, C_CYAN)
+    y += 4
+
     cpu_c = C_GREEN if cpu < 60 else (C_AMBER if cpu < 85 else C_RED)
     row("CPU LOAD",   f"{cpu:.0f}%",  cpu_c)
     bar("",           cpu, 100,       cpu_c)
@@ -137,10 +152,17 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
 
     y += 4
     # Detailed SLAM stats
-    row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
-    row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-    row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_WHITE)
-    row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_WHITE)
+    if profile_name == "glasses":
+        row("BACKEND", "LingBot-Map", C_GREEN)
+        row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+        row("SURFACE POINTS", f"{stats_db.get('active_splats', 0)} pts", C_WHITE)
+    else:
+        row("BACKEND", "VIGS-SLAM" if "stereo" in profile_name else "FAST-LIO2", C_GREEN)
+        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
+        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+        row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_WHITE)
+        row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_WHITE)
+
     row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_WHITE)
 
     y += 6
@@ -214,6 +236,10 @@ class HudRenderer(Node):
 
         self.bridge = CvBridge()
         self.camera_image = None
+
+        # Declare and get profile parameter
+        self.declare_parameter('profile', 'glasses')
+        self.profile = self.get_parameter('profile').get_parameter_value().string_value
 
         # ROS subscriptions
         self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, 10)
@@ -369,8 +395,11 @@ class HudRenderer(Node):
                     for idx in sort_idx:
                         px = int(u_scr[idx])
                         py = int(v_scr[idx])
-                        r_pix = int((scale_scr[idx] * self.fx) / z_scr[idx])
-                        r_pix = max(2, min(r_pix, 150))
+                        if self.profile == 'glasses':
+                            r_pix = 2
+                        else:
+                            r_pix = int((scale_scr[idx] * self.fx) / z_scr[idx])
+                            r_pix = max(2, min(r_pix, 150))
 
                         if self.visual_mode == 1:
                             color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
@@ -444,7 +473,7 @@ class HudRenderer(Node):
 
         # 5. Engineering Overlay (Left side)
         if self.show_eng:
-            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames)
+            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames, self.profile)
             cv2.putText(frame, "[ENG MODE ON]", (20, HEIGHT - 50), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
 
         # 6. Warnings overlay
