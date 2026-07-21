@@ -21,6 +21,8 @@ class LingBotBackendNode(Node):
         # Node parameters
         self.declare_parameter('cuda_enabled', True)
         self.cuda_enabled = self.get_parameter('cuda_enabled').get_parameter_value().bool_value
+        self.declare_parameter('sim_mode', False)
+        self.sim_mode = self.get_parameter('sim_mode').get_parameter_value().bool_value
 
         # Initialize bridge
         self.bridge = CvBridge()
@@ -34,16 +36,27 @@ class LingBotBackendNode(Node):
         self.all_colors = []
         self.active_dir = ""
 
-        # Attempt to import LingBot-Map
+        # Enforce Production dependencies if not in sim_mode
         self.has_lingbot = False
-        try:
-            import torch
-            # Dummy import to simulate/check the presence of lingbot_map library
-            from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
-            self.has_lingbot = True
-            self.get_logger().info("[LingBot-Map] PyTorch, CUDA, and lingbot_map package verified successfully.")
-        except ImportError:
-            self.get_logger().warn("[LingBot-Map] PyTorch/CUDA stack or 'lingbot_map' package not found on Jetson. Falling back to local Real-Time OpenCV Monocular Feature Mapper.")
+        if not self.sim_mode:
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    raise RuntimeError("PyTorch package is CPU-only, CUDA support is required.")
+                from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
+                self.has_lingbot = True
+                self.get_logger().info("[LingBot-Map] Production stack initialized. PyTorch & CUDA verified successfully.")
+            except Exception as e:
+                self.get_logger().error(
+                    "\n===========================================================\n"
+                    "[LingBot-Map] FATAL: Production dependencies not satisfied!\n"
+                    f"Detail: {e}\n"
+                    "Please run: sudo ./scripts/install_dependencies.sh\n"
+                    "===========================================================\n"
+                )
+                raise RuntimeError("Missing production dependencies for LingBot-Map reconstruction backend.")
+        else:
+            self.get_logger().warn("[LingBot-Map] Running in Simulation/Development mode. Bypassing production dependency requirements.")
 
         # Camera intrinsics
         self.fx = 960.0
@@ -68,7 +81,10 @@ class LingBotBackendNode(Node):
 
     def publish_status(self):
         msg = String()
-        msg.data = "LingBot-Map (Active)" if self.has_lingbot else "LingBot-Map (Local Fallback)"
+        if self.sim_mode:
+            msg.data = "LingBot-Map (Simulation)"
+        else:
+            msg.data = "LingBot-Map (Active)"
         self.status_pub.publish(msg)
 
     def handle_image(self, msg: Image):
@@ -83,20 +99,17 @@ class LingBotBackendNode(Node):
         self.cx = w / 2.0
         self.cy = h / 2.0
 
-        # Trajectory estimation & feature tracking
-        # If true LingBot is available, we run model inference.
-        # Otherwise, fall back to OpenCV feature tracking and nominal depth projection.
-        if self.has_lingbot:
-            self.run_lingbot_inference(cv_img, msg.header)
+        if self.sim_mode:
+            self.run_simulated_mapper(gray, cv_img, msg.header)
         else:
-            self.run_local_monocular_mapper(gray, cv_img, msg.header)
+            self.run_lingbot_inference(cv_img, msg.header)
 
     def run_lingbot_inference(self, cv_img, header):
         # Placeholder for true model inference. 
         # When PyTorch is installed, this executes the GCT model streaming workflow.
         pass
 
-    def run_local_monocular_mapper(self, gray, cv_img, header):
+    def run_simulated_mapper(self, gray, cv_img, header):
         # 1. Optical Flow Feature Tracking
         if self.prev_gray is not None and self.prev_pts is not None and len(self.prev_pts) > 0:
             next_pts, status, err = cv2.calcOpticalFlowPyrLK(

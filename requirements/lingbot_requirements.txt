@@ -1,0 +1,3 @@
+# LingBot-Map dependencies
+huggingface_hub
+modelscope

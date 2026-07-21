@@ -28,7 +28,7 @@ def launch_setup(context, *args, **kwargs):
                 package='lingbot_backend',
                 executable='lingbot_backend_node',
                 name='lingbot_backend',
-                parameters=[{'product': product_val}]
+                parameters=[{'product': product_val}, {'sim_mode': sim_mode_val}]
             ))
         else:
             nodes.append(Node(
