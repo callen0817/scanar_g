@@ -67,6 +67,7 @@ class DiagnosticsDashboard(Node):
         # Clear screen ANSI escape
         os.system('clear')
         
+        imu_display = "OFF" if self.imu_hz == 0.0 else f"{self.imu_hz:.1f} Hz"
         # Render a beautiful development status layout
         dashboard = f"""
 ===========================================================
@@ -77,7 +78,8 @@ class DiagnosticsDashboard(Node):
 
 [-] VITURE SENSOR LAYER:
     - RGB Camera Stream : {self.camera_fps:.1f} FPS
-    - IMU Sampling Rate : {self.imu_hz:.1f} Hz
+    - IMU Sampling Rate : {imu_display}
+    - Stereo Stream     : OFF
 
 [-] VIGS SLAM BACKEND:
     - Status            : [{self.vigs_status}]

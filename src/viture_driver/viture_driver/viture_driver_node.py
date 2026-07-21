@@ -112,6 +112,7 @@ class VitureDriverNode(Node):
                 imu_msg.angular_velocity.y = float(imu_data["gyro"][1])
                 imu_msg.angular_velocity.z = float(imu_data["gyro"][2])
                 self.imu_pub.publish(imu_msg)
+                self.imu_count += 1
 
             # Query tracking pose from HAL
             success_pose, pos, quat, t_pose = self.hal.get_pose()
@@ -133,7 +134,6 @@ class VitureDriverNode(Node):
             pass
 
         # Monitor IMU Rate
-        self.imu_count += 1
         now = time.time()
         if now - self.last_imu_time >= 2.0:
             hz = self.imu_count / (now - self.last_imu_time)
