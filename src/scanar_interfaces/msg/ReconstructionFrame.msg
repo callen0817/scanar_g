@@ -1,0 +1,10 @@
+std_msgs/Header header
+string backend_name
+geometry_msgs/Pose pose
+float32[] x
+float32[] y
+float32[] z
+uint8[] r
+uint8[] g
+uint8[] b
+float32 confidence

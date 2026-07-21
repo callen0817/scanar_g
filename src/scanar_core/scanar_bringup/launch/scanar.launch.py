@@ -7,6 +7,7 @@ from launch_ros.actions import Node
 
 def launch_setup(context, *args, **kwargs):
     mode = LaunchConfiguration('mode').perform(context)
+    product_val = LaunchConfiguration('product').perform(context)
 
     nodes = []
 
@@ -20,13 +21,21 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'sim_mode': sim_mode_val}]
         ))
 
-    # 2. VIGS-SLAM Backend Layer
+    # 2. Reconstruction Backend Layer
     if mode in ['field_test', 'production']:
-        nodes.append(Node(
-            package='vigs_backend',
-            executable='vigs_backend_node',
-            name='vigs_backend'
-        ))
+        if product_val == 'scanar_g':
+            nodes.append(Node(
+                package='lingbot_backend',
+                executable='lingbot_backend_node',
+                name='lingbot_backend',
+                parameters=[{'product': product_val}]
+            ))
+        else:
+            nodes.append(Node(
+                package='vigs_backend',
+                executable='vigs_backend_node',
+                name='vigs_backend'
+            ))
 
     # 3. Capture and Session Layer
     if mode in ['capture', 'field_test', 'production']:
@@ -56,7 +65,6 @@ def launch_setup(context, *args, **kwargs):
 
     # 5. Visualizations HUD & Console Dashboards Layer
     if mode in ['field_test', 'production']:
-        product_val = LaunchConfiguration('product').perform(context)
         nodes.append(Node(
             package='viture_hud',
             executable='hud_renderer.py',

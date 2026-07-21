@@ -20,7 +20,7 @@ from rclpy.node import Node
 from std_msgs.msg import String, Bool, Float32
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
-from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, SystemHealth
+from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, SystemHealth, ReconstructionFrame
 from cv_bridge import CvBridge
 
 from hud_widgets.keyplan import KeyplanWidget
@@ -244,7 +244,7 @@ class HudRenderer(Node):
         # ROS subscriptions
         self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, 10)
         self.create_subscription(Odometry, '/fast_lio/odometry', self._cb_odom, 10)
-        self.create_subscription(GaussianSplatArray, '/vigs/gaussian_splats', self._cb_splats, 10)
+        self.create_subscription(ReconstructionFrame, '/scanar/reconstruction', self._cb_reconstruction, 10)
         self.create_subscription(Float32, '/scanar/scan_confidence', self._cb_confidence, 10)
         self.create_subscription(String, '/vigs/status', self._cb_status, 10)
         self.create_subscription(Float32, '/viture/camera/fps', self._cb_fps, 10)
@@ -283,8 +283,8 @@ class HudRenderer(Node):
         # Update pose in floor plan keyplan (X and Z represent floor coordinates)
         self.keyplan.update_pose(tx, tz, yaw)
 
-    def _cb_splats(self, msg: GaussianSplatArray):
-        self.gaussian_count = len(msg.splats)
+    def _cb_reconstruction(self, msg: ReconstructionFrame):
+        self.gaussian_count = len(msg.x)
         if self.gaussian_count == 0:
             self.splat_positions = np.zeros((0, 3), dtype=np.float32)
             self.splat_colors = np.zeros((0, 3), dtype=np.uint8)
@@ -292,25 +292,20 @@ class HudRenderer(Node):
             self.splat_opacities = np.zeros((0,), dtype=np.float32)
             return
 
-        # Vectorized parsing of splats
-        positions = []
-        colors = []
-        scales = []
-        opacities = []
-        map_points_2d = []
-        for s in msg.splats:
-            positions.append([s.x, s.y, s.z])
-            colors.append([int(s.b), int(s.g), int(s.r)]) # BGR for OpenCV
-            scales.append(s.scale)
-            opacities.append(s.opacity)
-            map_points_2d.append((s.x, s.z))
+        self.splat_positions = np.zeros((self.gaussian_count, 3), dtype=np.float32)
+        self.splat_positions[:, 0] = msg.x
+        self.splat_positions[:, 1] = msg.y
+        self.splat_positions[:, 2] = msg.z
 
-        self.splat_positions = np.array(positions, dtype=np.float32)
-        self.splat_colors = np.array(colors, dtype=np.uint8)
-        self.splat_scales = np.array(scales, dtype=np.float32)
-        self.splat_opacities = np.array(opacities, dtype=np.float32)
+        self.splat_colors = np.zeros((self.gaussian_count, 3), dtype=np.uint8)
+        self.splat_colors[:, 0] = msg.b
+        self.splat_colors[:, 1] = msg.g
+        self.splat_colors[:, 2] = msg.r
 
-        # Feed splat 2D coordinates into the real-time floor plan keyplan
+        self.splat_scales = np.ones((self.gaussian_count,), dtype=np.float32) * 0.05
+        self.splat_opacities = np.ones((self.gaussian_count,), dtype=np.float32) * 1.0
+
+        map_points_2d = list(zip(msg.x, msg.z))
         self.keyplan.update_map_points(map_points_2d)
 
     def _cb_confidence(self, msg: Float32):

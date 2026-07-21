@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Float32
-from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray
+from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, ReconstructionFrame
 import json
 import os
 import time
@@ -34,7 +34,10 @@ class DiagnosticsDashboard(Node):
         self.create_subscription(String, '/vigs/status', self.cb_status, 10)
         self.create_subscription(Float32, '/viture/camera/fps', self.cb_fps, 10)
         self.create_subscription(Float32, '/viture/imu/rate', self.cb_imu_rate, 10)
-        self.create_subscription(GaussianSplatArray, '/vigs/gaussian_splats', self.cb_splats, 10)
+        if self.product == 'scanar_g':
+            self.create_subscription(ReconstructionFrame, '/scanar/reconstruction', self.cb_reconstruction, 10)
+        else:
+            self.create_subscription(GaussianSplatArray, '/vigs/gaussian_splats', self.cb_splats, 10)
         self.create_subscription(Float32, '/scanar/scan_confidence', self.cb_confidence, 10)
         self.create_subscription(String, '/scanar/diagnostics/latency_report', self.cb_latency, 10)
         self.create_subscription(String, '/scanar/session/active_directory', self.cb_active_dir, 10)
@@ -55,6 +58,9 @@ class DiagnosticsDashboard(Node):
 
     def cb_splats(self, msg):
         self.gaussian_count = len(msg.splats)
+
+    def cb_reconstruction(self, msg):
+        self.gaussian_count = len(msg.x)
 
     def cb_confidence(self, msg):
         self.overall_confidence = msg.data
