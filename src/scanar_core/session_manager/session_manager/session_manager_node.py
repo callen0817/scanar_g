@@ -50,11 +50,9 @@ class ScanGSessionManager(Node):
         
         # Heartbeat timer
         self.timer = self.create_timer(0.1, self.publish_state)
-        self.get_logger().info('ScanAR G Session Manager Node Initialized in BOOT.')
+        self.get_logger().info('ScanAR G V1.5 Session Manager Node Initialized in BOOT.')
         
-        # Advance state automatically
         self.transition_to('CHECKING_HARDWARE')
-        # Check camera node or simulate
         self.transition_to('READY')
 
     def publish_state(self):
@@ -105,7 +103,6 @@ class ScanGSessionManager(Node):
         idx = self.get_next_capture_index()
         self.session_start_time = datetime.datetime.utcnow().isoformat() + "Z"
         
-        # Create folder structure matching V1 Capture System specs: Capture_XXX_UUID/
         self.session_dir = os.path.join(self.base_captures_dir, f"Capture_{idx:03d}_{self.session_uuid}")
         
         try:
@@ -132,6 +129,11 @@ class ScanGSessionManager(Node):
 
         self.transition_to('FINALIZING')
         
+        # Publish active directory as empty string immediately to trigger exporters
+        active_dir_msg = String()
+        active_dir_msg.data = ""
+        self.active_dir_pub.publish(active_dir_msg)
+        
         # Write capture metadata manifest
         meta_path = os.path.join(self.session_dir, "metadata.json")
         metadata = {
@@ -150,10 +152,127 @@ class ScanGSessionManager(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to write metadata: {e}")
 
+        # Execute V1.5 Dataset Validator
+        self.run_dataset_validator()
+
         self.transition_to('COMPLETE')
         response.success = True
         response.message = f"Session finalized at {self.session_dir}. Transitioned to COMPLETE."
         return response
+
+    def run_dataset_validator(self):
+        self.get_logger().info("Executing V1.5 Dataset Validator...")
+        import time
+        time.sleep(1.8) # Wait to allow vigs_backend and continuous_capture to finish writing deliverables
+        
+        score = 100
+        warnings = []
+        checks = {}
+
+        # 1. Verify standard files
+        splat_path = os.path.join(self.session_dir, "scene.splat")
+        if os.path.exists(splat_path):
+            size = os.path.getsize(splat_path)
+            if size > 0:
+                # Standard antimatter15 splat file must be a multiple of 32 bytes
+                if size % 32 == 0:
+                    checks["scene.splat"] = f"VALID (size: {size} bytes, {size//32} splats)"
+                else:
+                    checks["scene.splat"] = f"INVALID FORMAT (size: {size} bytes, not a multiple of 32)"
+                    score -= 10
+                    warnings.append("scene.splat is not formatted to standard 32-byte alignment")
+            else:
+                checks["scene.splat"] = "EMPTY FILE"
+                score -= 15
+                warnings.append("scene.splat is empty")
+        else:
+            checks["scene.splat"] = "MISSING"
+            score -= 15
+            warnings.append("scene.splat is missing")
+
+        ply_path = os.path.join(self.session_dir, "scene.ply")
+        if os.path.exists(ply_path):
+            # Check header
+            try:
+                with open(ply_path, 'r') as f:
+                    header_line = f.readline().strip()
+                if header_line == "ply":
+                    checks["scene.ply"] = "VALID (header verified)"
+                else:
+                    checks["scene.ply"] = "INVALID HEADER"
+                    score -= 10
+                    warnings.append("scene.ply lacks valid PLY header")
+            except:
+                checks["scene.ply"] = "UNREADABLE"
+                score -= 10
+                warnings.append("scene.ply is unreadable")
+        else:
+            checks["scene.ply"] = "MISSING"
+            score -= 15
+            warnings.append("scene.ply is missing")
+
+        # 2. Check metadata
+        meta_path = os.path.join(self.session_dir, "metadata.json")
+        if os.path.exists(meta_path):
+            checks["metadata.json"] = "VALID"
+        else:
+            checks["metadata.json"] = "MISSING"
+            score -= 15
+            warnings.append("metadata.json is missing")
+
+        # 3. Check trajectories & IMU
+        poses_csv = os.path.join(self.session_dir, "poses/poses.csv")
+        poses_tum = os.path.join(self.session_dir, "poses/poses.tum")
+        if os.path.exists(poses_csv) and os.path.exists(poses_tum):
+            checks["poses"] = "VALID (TUM & CSV verified)"
+        else:
+            checks["poses"] = "MISSING TRAJECTORY DELIVERABLES"
+            score -= 15
+            warnings.append("Trajectory poses.csv or poses.tum is missing")
+
+        imu_csv = os.path.join(self.session_dir, "imu/imu_raw.csv")
+        if os.path.exists(imu_csv):
+            checks["imu"] = "VALID"
+        else:
+            checks["imu"] = "MISSING IMU DATA"
+            score -= 15
+            warnings.append("imu_raw.csv is missing")
+
+        # 4. Check RGB frames
+        rgb_dir = os.path.join(self.session_dir, "rgb")
+        if os.path.exists(rgb_dir):
+            frames = glob.glob(os.path.join(rgb_dir, "*.jpg"))
+            if len(frames) > 0:
+                checks["rgb_frames"] = f"VALID ({len(frames)} frames recorded)"
+            else:
+                checks["rgb_frames"] = "NO IMAGES CAPTURED"
+                score -= 15
+                warnings.append("rgb/ directory is empty")
+        else:
+            checks["rgb_frames"] = "MISSING DIR"
+            score -= 15
+            warnings.append("rgb/ directory is missing")
+
+        # Make sure score doesn't go below 0
+        score = max(0, score)
+
+        # Build validation report
+        report = {
+            "validation_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "capture_quality_score": score,
+            "checks": checks,
+            "warnings": warnings if warnings else ["None"]
+        }
+
+        # Write to validation_report.json
+        report_path = os.path.join(self.session_dir, "validation_report.json")
+        try:
+            with open(report_path, 'w') as f:
+                json.dump(report, f, indent=2)
+            self.get_logger().info(f"Dataset Validator: Capture Quality: {score}%, Warnings: {', '.join(warnings) if warnings else 'None'}")
+            self.get_logger().info(f"Validation report saved to: {report_path}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to write validation report: {e}")
 
     def handle_pause(self, request, response):
         if self.current_state == 'CAPTURING':

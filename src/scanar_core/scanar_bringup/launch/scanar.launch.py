@@ -12,11 +12,12 @@ def launch_setup(context, *args, **kwargs):
 
     # 1. VITURE Sensor Driver Layer
     if mode in ['hardware', 'field_test', 'production']:
+        sim_mode_val = True if mode == 'field_test' else False
         nodes.append(Node(
             package='viture_driver',
             executable='viture_driver_node',
             name='viture_driver',
-            parameters=[{'sim_mode': False}]
+            parameters=[{'sim_mode': sim_mode_val}]
         ))
 
     # 2. VIGS-SLAM Backend Layer

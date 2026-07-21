@@ -68,12 +68,40 @@ def _panel(frame, x, y, w, h, alpha=0.82):
     cv2.addWeighted(ov, alpha, frame, 1 - alpha, 0, frame)
     cv2.rectangle(frame, (x, y), (x + w, y + h), C_EDGE, 1)
 
-def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, splats):
-    EX, EY, EW, EH = 20, 56, 360, 500
+def _get_gpu_load():
+    try:
+        with open("/sys/class/devfreq/17000000.gpu/device/load", "r") as f:
+            return float(f.read().strip()) / 10.0
+    except:
+        return 15.0
+
+def _get_gpu_memory():
+    try:
+        with open("/proc/meminfo", "r") as f:
+            lines = f.readlines()
+        total, free = 0, 0
+        for line in lines:
+            if line.startswith("MemTotal:"):
+                total = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                free = int(line.split()[1])
+        if total > 0:
+            used_gb = (total - free) / (1024 * 1024)
+            total_gb = total / (1024 * 1024)
+            return used_gb, total_gb
+    except:
+        pass
+    return 3.2, 16.0
+
+def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropped_f):
+    EX, EY, EW, EH = 20, 56, 360, 520
     _panel(frame, EX, EY, EW, EH)
     cv2.putText(frame, "ENGINEERING STATUS", (EX + 10, EY + 18),
                 FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
     y = EY + 40
+
+    gpu_load = _get_gpu_load()
+    vram_used, vram_total = _get_gpu_memory()
 
     def row(lbl, val, col=C_WHITE):
         nonlocal y
@@ -93,23 +121,29 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, splats):
     row("CPU LOAD",   f"{cpu:.0f}%",  cpu_c)
     bar("",           cpu, 100,       cpu_c)
 
+    gpu_c = C_GREEN if gpu_load < 60 else (C_AMBER if gpu_load < 85 else C_RED)
+    row("GPU UTIL",   f"{gpu_load:.1f}%", gpu_c)
+    bar("",           gpu_load, 100,       gpu_c)
+
     ram_c = C_GREEN if ram < 70 else C_AMBER
-    row("RAM",        f"{ram:.0f}%",  ram_c)
-    bar("",           ram, 100,       ram_c)
+    row("VRAM USED",  f"{vram_used:.1f} / {vram_total:.0f} GB", ram_c)
+    bar("",           (vram_used/vram_total)*100.0, 100, ram_c)
 
     tmp_c = C_GREEN if temp < 65 else (C_AMBER if temp < 78 else C_RED)
     row("CPU TEMP",   f"{temp:.0f}°C", tmp_c)
     bar("",           temp, 100,       tmp_c)
 
-    y += 6
-    row("LATENCY",    f"{lat_ms:.1f} ms", _lat_color(lat_ms))
-    row("CONFIDENCE", f"{confidence:.0f}%",
-        C_GREEN if confidence >= 80 else C_AMBER)
-    row("GAUSSIANS",  f"{splats:,}",   C_WHITE)
+    y += 4
+    # Detailed SLAM stats
+    row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
+    row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+    row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_WHITE)
+    row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_WHITE)
+    row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_WHITE)
 
-    y += 8
+    y += 6
     if len(LAT_HIST) > 2:
-        gx, gy, gw, gh = EX + 14, y, EW - 28, 75
+        gx, gy, gw, gh = EX + 14, y, EW - 28, 65
         cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (18, 18, 18), -1)
         cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), C_DIM, 1)
         vals = list(LAT_HIST)
@@ -123,7 +157,7 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, splats):
         for i in range(1, len(pts)):
             cv2.line(frame, pts[i - 1], pts[i],
                      _lat_color(vals[i]), 1, cv2.LINE_AA)
-        cv2.putText(frame, "LATENCY HISTORY", (gx, gy - 3),
+        cv2.putText(frame, "CUDA FRAME LATENCY HISTORY", (gx, gy - 3),
                     FONT, 0.28, C_DIM, 1)
 
 class HudRenderer(Node):
@@ -145,7 +179,12 @@ class HudRenderer(Node):
         self.latency_ms = 0.0
         self.show_eng = False
         self.dist_m = 0.0
-        self.calib_ok = True  # visual-inertial tracking defaults to ready
+        self.calib_ok = True
+        
+        # V1.5 statistics & metrics
+        self.stats_db = {}
+        self.dropped_frames = 0
+        self.last_draw_time = time.time()
         
         self._t_start = time.time()
 
@@ -156,7 +195,7 @@ class HudRenderer(Node):
         self.keyplan = KeyplanWidget()
 
         # Camera Intrinsics
-        self.fx = 960.0 # scaled for 1920x1080
+        self.fx = 960.0
         self.fy = 960.0
         self.cx = WIDTH / 2.0
         self.cy = HEIGHT / 2.0
@@ -182,21 +221,20 @@ class HudRenderer(Node):
         self.create_subscription(SystemHealth, '/scanar/diagnostics/system_health', self._cb_health, 10)
         self.create_subscription(String, '/scanar/diagnostics/latency_report', self._cb_latency, 10)
         self.create_subscription(Bool, '/scanar/hud/eng_mode', self._cb_eng, 10)
+        self.create_subscription(String, '/vigs/statistics', self._cb_stats_json, 10)
 
-        self.get_logger().info("ScanAR G HUD Renderer Node Initialized.")
+        self.get_logger().info("ScanAR G V1.5 HUD Renderer Node Initialized.")
 
     def _cb_odom(self, msg: Odometry):
         tx = msg.pose.pose.position.x
         ty = msg.pose.pose.position.y
         tz = msg.pose.pose.position.z
         
-        # Calculate yaw heading from quaternion
         q = msg.pose.pose.orientation
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
-        # Calculate distance
         if len(self.keyplan._trajectory) > 0:
             self.dist_m += math.hypot(tx - self.pose_pos[0], ty - self.pose_pos[1])
 
@@ -267,16 +305,28 @@ class HudRenderer(Node):
     def _cb_eng(self, msg: Bool):
         self.show_eng = msg.data
 
+    def _cb_stats_json(self, msg: String):
+        try:
+            self.stats_db = json.loads(msg.data)
+        except Exception:
+            pass
+
     def draw(self, frame: np.ndarray) -> None:
+        # Calculate dropped frames
+        now = time.time()
+        dt = now - self.last_draw_time
+        self.last_draw_time = now
+        if dt > 1.5 * (1.0 / 60.0):
+            self.dropped_frames += int(dt / (1.0 / 60.0)) - 1
+
         # Clear screen to BG_COLOR
         frame[:] = BG_COLOR
 
-        # 1. Project and render 3D Gaussian Splats if available
+        # 1. Project and render 3D Gaussian Splats
         if len(self.splat_positions) > 0:
             rel_pos = self.splat_positions - self.pose_pos
             p_cam = rel_pos @ self.pose_rot_mat
 
-            # Filter points in front of the camera (Z_cam > 0.1)
             mask = p_cam[:, 2] > 0.1
             if np.any(mask):
                 p_cam_filt = p_cam[mask]
@@ -284,52 +334,39 @@ class HudRenderer(Node):
                 scales_filt = self.splat_scales[mask]
                 opacities_filt = self.splat_opacities[mask]
 
-                # Project to image plane
-                z = p_cam_filt[:, 2]
-                u = (self.fx * p_cam_filt[:, 0] / z) + self.cx
-                v = (self.fy * p_cam_filt[:, 1] / z) + self.cy
+                u = (self.fx * p_cam_filt[:, 0] / p_cam_filt[:, 2]) + self.cx
+                v = (self.fy * p_cam_filt[:, 1] / p_cam_filt[:, 2]) + self.cy
 
-                # Filter points on screen
                 screen_mask = (u >= 0) & (u < WIDTH) & (v >= 0) & (v < HEIGHT)
                 if np.any(screen_mask):
                     u_scr = u[screen_mask]
                     v_scr = v[screen_mask]
-                    z_scr = z[screen_mask]
+                    z_scr = p_cam_filt[:, 2][screen_mask]
                     col_scr = colors_filt[screen_mask]
                     scale_scr = scales_filt[screen_mask]
-                    op_scr = opacities_filt[screen_mask]
 
-                    # Sort points by depth (back to front) for alpha blending
                     sort_idx = np.argsort(z_scr)[::-1]
 
                     for idx in sort_idx:
                         px = int(u_scr[idx])
                         py = int(v_scr[idx])
-                        
-                        # Size is scale projected onto screen
                         r_pix = int((scale_scr[idx] * self.fx) / z_scr[idx])
                         r_pix = max(2, min(r_pix, 150))
 
-                        # Determine color based on mode
                         if self.visual_mode == 1:
-                            # Natural RGB Mode
                             color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
                         elif self.visual_mode == 2:
-                            # ScanAR Green Mode
                             intensity = int(120 + 135 * (self.confidence / 100.0))
                             color = (50, intensity, 50)
                         else:
-                            # Hybrid Mode
                             color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
 
-                        # Draw splat
                         if self.visual_mode == 3:
-                            # Draw outer confidence green ring
                             cv2.circle(frame, (px, py), r_pix + 2, (30, 180, 50), 1, cv2.LINE_AA)
                         
                         cv2.circle(frame, (px, py), r_pix, color, -1, cv2.LINE_AA)
 
-        # 2. Render Top Strip Dashboard (Same as ScanAR Dual, but labeled ScanAR G)
+        # 2. Render Top Strip Dashboard
         ov = frame.copy()
         cv2.rectangle(ov, (0, 0), (WIDTH, 44), C_PANEL, -1)
         cv2.addWeighted(ov, 0.78, frame, 0.22, 0, frame)
@@ -340,29 +377,39 @@ class HudRenderer(Node):
         cv2.circle(frame, (24, 22), 9, rec_col, -1)
         cv2.putText(frame, "REC" if self.active_dir else "STBY", (40, 28), FONT, 0.46, rec_col, 1, cv2.LINE_AA)
 
-        # Tracking status
-        trk_txt = "TRACKING" if self.confidence >= 80 else "DEGRADED"
-        trk_col = C_GREEN if self.confidence >= 80 else _blink(C_AMBER, C_DIM, hz=1.5)
-        cv2.circle(frame, (118, 22), 6, trk_col, -1)
-        cv2.putText(frame, trk_txt, (132, 28), FONT, 0.44, trk_col, 1, cv2.LINE_AA)
+        # Confidence Rating (LOST, LOW, MEDIUM, HIGH)
+        conf_str = "LOST"
+        conf_col = C_RED
+        if self.confidence >= 90.0:
+            conf_str = "HIGH"
+            conf_col = C_GREEN
+        elif self.confidence >= 70.0:
+            conf_str = "MEDIUM"
+            conf_col = C_CYAN
+        elif self.confidence >= 40.0:
+            conf_str = "LOW"
+            conf_col = C_AMBER
+
+        cv2.circle(frame, (118, 22), 6, conf_col, -1)
+        cv2.putText(frame, f"VIGS: {conf_str}", (132, 28), FONT, 0.44, conf_col, 1, cv2.LINE_AA)
 
         # Title
-        cv2.putText(frame, "SCANAR  G", (WIDTH // 2 - 72, 29), FONT, 0.52, C_CYAN, 1, cv2.LINE_AA)
+        cv2.putText(frame, "SCANAR  G  V1.5", (WIDTH // 2 - 95, 29), FONT, 0.52, C_CYAN, 1, cv2.LINE_AA)
 
         # Calibration state
         calib_txt = "CALIB ✓" if self.calib_ok else "CALIB —"
         calib_col = C_GREEN if self.calib_ok else C_DIM
-        cv2.putText(frame, calib_txt, (WIDTH // 2 + 100, 29), FONT, 0.40, calib_col, 1, cv2.LINE_AA)
+        cv2.putText(frame, calib_txt, (WIDTH // 2 + 120, 29), FONT, 0.40, calib_col, 1, cv2.LINE_AA)
 
         # Latency & Distance
         lat_txt = f"LAT {self.latency_ms:.0f}ms   {self.dist_m:.0f}m"
         lw, _ = cv2.getTextSize(lat_txt, FONT, 0.44, 1)[0]
         cv2.putText(frame, lat_txt, (WIDTH - lw - 20, 28), FONT, 0.44, C_WHITE, 1, cv2.LINE_AA)
 
-        # 3. Real-Time 2D Floor Plan minimap (Bottom-right corner)
+        # 3. Real-Time 2D Floor Plan minimap
         self.keyplan.draw(frame, KP_X, KP_Y, KP_W, KP_H)
 
-        # 4. Mode Help Panel (Bottom-Left)
+        # 4. Mode Help Panel
         b_panel_w, b_panel_h = 360, 115
         _panel_x, _panel_y = 20, HEIGHT - b_panel_h - 60
         ov_b = frame.copy()
@@ -378,10 +425,10 @@ class HudRenderer(Node):
 
         # 5. Engineering Overlay (Left side)
         if self.show_eng:
-            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.gaussian_count)
+            _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames)
             cv2.putText(frame, "[ENG MODE ON]", (20, HEIGHT - 50), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
 
-        # 6. Warnings overlay (if tracking is lost / poor)
+        # 6. Warnings overlay
         if self.confidence < 70:
             wc = _blink(C_AMBER, C_DIM, hz=1.2)
             cv2.putText(frame, "⚠  SLAM QUALITY DEGRADED — SLOW DOWN",
@@ -397,7 +444,7 @@ class HudRenderer(Node):
         elapsed = time.time() - self._t_start
         ts = time.strftime("%H:%M:%S")
         cv2.putText(frame,
-                    f"ScanAR G  ·  {ts}  ·  "
+                    f"ScanAR G V1.5  ·  {ts}  ·  "
                     f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d} elapsed",
                     (16, HEIGHT - 10), FONT, 0.38, C_DIM, 1, cv2.LINE_AA)
 

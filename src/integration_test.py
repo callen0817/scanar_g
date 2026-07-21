@@ -8,6 +8,7 @@ import subprocess
 import os
 import shutil
 import sys
+import json
 
 def run_integration_test():
     print("=== STARTING SCANAR G SYSTEM INTEGRATION TEST ===")
@@ -86,6 +87,7 @@ def run_integration_test():
         "metadata.json",
         "scene.splat",
         "scene.ply",
+        "validation_report.json",
         os.path.join("poses", "poses.csv"),
         os.path.join("poses", "poses.tum"),
         os.path.join("imu", "imu_raw.csv")
@@ -96,8 +98,23 @@ def run_integration_test():
             print(f"FAIL: Required file missing: {p}")
             return False
         print(f"✓ Found: {rf} (size: {os.path.getsize(p)} bytes)")
+
+    # Read and print validation report summary
+    try:
+        with open(os.path.join(session_dir, "validation_report.json"), "r") as f:
+            report = json.load(f)
+        print(f"\n--- DATASET VALIDATION REPORT ---")
+        print(f"Quality Score: {report.get('capture_quality_score')}%")
+        print(f"Warnings: {report.get('warnings')}")
+        print(f"---------------------------------")
+        if report.get('capture_quality_score', 0) < 80:
+            print("FAIL: Dataset quality score is too low!")
+            return False
+    except Exception as e:
+        print(f"FAIL: Could not parse validation_report.json: {e}")
+        return False
         
-    print("\nSUCCESS: All files and folder structures matching the V1 roadmap are present and verified!")
+    print("\nSUCCESS: All files and folder structures matching the V1.5 stabilization roadmap are present and verified!")
     return True
 
 if __name__ == "__main__":

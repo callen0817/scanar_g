@@ -11,7 +11,7 @@ install(PROGRAMS
 )
 
 install(DIRECTORY src/hud_widgets
-  DESTINATION share/${PROJECT_NAME}/src
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
