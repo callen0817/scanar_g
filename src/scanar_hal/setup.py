@@ -21,6 +21,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'verify_usb_capture = scanar_hal.verify_usb_capture:main'
         ],
     },
 )
