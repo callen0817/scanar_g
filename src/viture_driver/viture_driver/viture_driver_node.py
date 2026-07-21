@@ -10,6 +10,9 @@ import numpy as np
 import time
 import math
 
+# Import the ScanAR Hardware Abstraction Layer
+from scanar_hal import MockVitureHAL
+
 class VitureDriverNode(Node):
     def __init__(self):
         super().__init__('viture_driver')
@@ -35,20 +38,26 @@ class VitureDriverNode(Node):
         self.fps_pub = self.create_publisher(Float32, '/viture/camera/fps', 10)
         self.imu_hz_pub = self.create_publisher(Float32, '/viture/imu/rate', 10)
 
-        # Video capture init
+        # HAL & Hardware configurations
+        self.hal = None
         self.cap = None
-        if not self.sim_mode:
+
+        if self.sim_mode:
+            self.get_logger().info("Initializing VITURE HAL Driver in SIMULATION mode.")
+            self.hal = MockVitureHAL()
+        else:
             self.get_logger().info(f"Initializing VITURE Camera on device node: /dev/video{self.video_device}")
             self.cap = cv2.VideoCapture(self.video_device)
             if not self.cap.isOpened():
-                self.get_logger().warn(f"Failed to open physical camera at /dev/video{self.video_device}. Falling back to simulation frames.")
+                self.get_logger().warn(f"Failed to open physical camera at /dev/video{self.video_device}. Falling back to simulation HAL.")
                 self.sim_mode = True
+                self.hal = MockVitureHAL()
         
         # Timers
         self.cam_timer = self.create_timer(1.0 / self.publish_rate, self.publish_camera_frame)
         self.imu_timer = self.create_timer(1.0 / self.imu_rate, self.publish_imu_and_pose)
 
-        # Simulation state variables
+        # Profiling variables
         self.start_time = time.time()
         self.frame_count = 0
         self.last_fps_time = time.time()
@@ -60,30 +69,15 @@ class VitureDriverNode(Node):
     def publish_camera_frame(self):
         ret = False
         frame = None
+        t_sec = 0.0
         
         if not self.sim_mode and self.cap is not None:
             ret, frame = self.cap.read()
-            
-        if not ret:
-            # Generate beautiful synthetic calibration / reality pattern
-            frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            # Draw a grid pattern simulating features
-            t = time.time() - self.start_time
-            cx = int(320 + 80 * math.sin(t * 0.5))
-            cy = int(240 + 60 * math.cos(t * 0.7))
-            cv2.circle(frame, (cx, cy), 30, (70, 230, 120), -1)
-            cv2.putText(frame, f"VITURE SIM FRAME", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-            cv2.putText(frame, f"TIME: {t:.2f}s", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (220, 205, 0), 2)
-            
-            # Draw some grid points representing "features" in the environment
-            for i in range(10):
-                gx = int(320 + 150 * math.sin(i + t * 0.2))
-                gy = int(240 + 100 * math.cos(i * 1.5 + t * 0.3))
-                cv2.drawMarker(frame, (gx, gy), (0, 255, 255), cv2.MARKER_CROSS, 15, 2)
-                
-            ret = True
+            t_sec = time.time()
+        elif self.sim_mode and self.hal is not None:
+            ret, frame, t_sec = self.hal.get_frame()
 
-        if ret:
+        if ret and frame is not None:
             # Publish image
             msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             msg.header.stamp = self.get_clock().now().to_msg()
@@ -102,72 +96,41 @@ class VitureDriverNode(Node):
                 self.last_fps_time = now
 
     def publish_imu_and_pose(self):
-        t = time.time() - self.start_time
         stamp = self.get_clock().now().to_msg()
 
-        # 1. IMU Msg
-        imu_msg = Imu()
-        imu_msg.header.stamp = stamp
-        imu_msg.header.frame_id = "viture_imu_frame"
+        if self.sim_mode and self.hal is not None:
+            # Query IMU data from HAL
+            success_imu, imu_data, t_imu = self.hal.get_imu_data()
+            if success_imu:
+                imu_msg = Imu()
+                imu_msg.header.stamp = stamp
+                imu_msg.header.frame_id = "viture_imu_frame"
+                imu_msg.linear_acceleration.x = float(imu_data["accel"][0])
+                imu_msg.linear_acceleration.y = float(imu_data["accel"][1])
+                imu_msg.linear_acceleration.z = float(imu_data["accel"][2])
+                imu_msg.angular_velocity.x = float(imu_data["gyro"][0])
+                imu_msg.angular_velocity.y = float(imu_data["gyro"][1])
+                imu_msg.angular_velocity.z = float(imu_data["gyro"][2])
+                self.imu_pub.publish(imu_msg)
 
-        # Simulate natural walking vibrations on IMU
-        # Walking frequency: ~1.8 Hz (approx 1.8 steps per second)
-        walk_freq = 1.8 * 2 * math.pi
-        
-        # Accelerometer (adds gravity + walking bobbing)
-        acc_x = 0.1 * math.sin(t * walk_freq)
-        acc_y = 0.1 * math.cos(t * walk_freq)
-        acc_z = 9.81 + 0.3 * math.sin(t * walk_freq * 2) # vertical acceleration has double walking frequency
-        imu_msg.linear_acceleration.x = acc_x + np.random.normal(0, 0.02)
-        imu_msg.linear_acceleration.y = acc_y + np.random.normal(0, 0.02)
-        imu_msg.linear_acceleration.z = acc_z + np.random.normal(0, 0.02)
-
-        # Gyroscope (rotational speed of head)
-        gyro_x = 0.05 * math.sin(t * 0.5)
-        gyro_y = 0.08 * math.cos(t * 0.7)
-        gyro_z = 0.03 * math.sin(t * 0.3)
-        imu_msg.angular_velocity.x = gyro_x + np.random.normal(0, 0.005)
-        imu_msg.angular_velocity.y = gyro_y + np.random.normal(0, 0.005)
-        imu_msg.angular_velocity.z = gyro_z + np.random.normal(0, 0.005)
-
-        self.imu_pub.publish(imu_msg)
-
-        # 2. Pose Msg
-        # Simulates walking in a loop / figure 8 in the room
-        pose_msg = PoseStamped()
-        pose_msg.header.stamp = stamp
-        pose_msg.header.frame_id = "odom"
-
-        # Trajectory simulation (smooth scale)
-        scale_x = 2.0
-        scale_y = 1.5
-        pos_x = scale_x * math.sin(t * 0.1)
-        pos_y = scale_y * math.sin(t * 0.2) # figure 8 path
-        pos_z = 1.6 + 0.03 * math.sin(t * walk_freq) # height at 1.6m with walking bobbing
-
-        pose_msg.pose.position.x = pos_x
-        pose_msg.pose.position.y = pos_y
-        pose_msg.pose.position.z = pos_z
-
-        # Orientation: looking forward along trajectory
-        yaw = math.atan2(2 * math.cos(t * 0.2) * scale_y * 0.2, math.cos(t * 0.1) * scale_x * 0.1)
-        pitch = 0.05 * math.sin(t * walk_freq) # nodding
-        roll = 0.02 * math.cos(t * walk_freq)  # swaying
-
-        # Convert Euler angles to quaternion
-        cy = math.cos(yaw * 0.5)
-        sy = math.sin(yaw * 0.5)
-        cp = math.cos(pitch * 0.5)
-        sp = math.sin(pitch * 0.5)
-        cr = math.cos(roll * 0.5)
-        sr = math.sin(roll * 0.5)
-
-        pose_msg.pose.orientation.w = cr * cp * cy + sr * sp * sy
-        pose_msg.pose.orientation.x = sr * cp * cy - cr * sp * sy
-        pose_msg.pose.orientation.y = cr * sp * cy + sr * cp * sy
-        pose_msg.pose.orientation.z = cr * cp * sy - sr * sp * cy
-
-        self.pose_pub.publish(pose_msg)
+            # Query tracking pose from HAL
+            success_pose, pos, quat, t_pose = self.hal.get_pose()
+            if success_pose:
+                pose_msg = PoseStamped()
+                pose_msg.header.stamp = stamp
+                pose_msg.header.frame_id = "odom"
+                pose_msg.pose.position.x = float(pos[0])
+                pose_msg.pose.position.y = float(pos[1])
+                pose_msg.pose.position.z = float(pos[2])
+                pose_msg.pose.orientation.w = float(quat[0])
+                pose_msg.pose.orientation.x = float(quat[1])
+                pose_msg.pose.orientation.y = float(quat[2])
+                pose_msg.pose.orientation.z = float(quat[3])
+                self.pose_pub.publish(pose_msg)
+        else:
+            # Under hardware mode, raw IMU reading happens here.
+            # Currently fallback to simulation if SDK endpoints are restricted.
+            pass
 
         # Monitor IMU Rate
         self.imu_count += 1
