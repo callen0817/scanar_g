@@ -1,0 +1,7 @@
+# Global configurations parameter values for scanar_bringup
+/**:
+  ros__parameters:
+    use_sim_time: false
+    left_airy_ip: "192.168.10.10"
+    right_airy_ip: "192.168.11.11"
+    device: "/dev/scanar/ig2"

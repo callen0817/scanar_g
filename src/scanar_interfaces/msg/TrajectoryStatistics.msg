@@ -1,0 +1,3 @@
+int32 total_poses
+float32 total_distance_meters
+float32 duration_seconds

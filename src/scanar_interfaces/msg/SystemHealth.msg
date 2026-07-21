@@ -1,0 +1,3 @@
+float32 cpu_load
+float32 memory_usage
+float32 cpu_temperature

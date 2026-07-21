@@ -1,0 +1,3 @@
+string sensor_name
+float64 time_offset_ns
+float32 jitter_ms

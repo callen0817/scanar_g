@@ -1,0 +1,4 @@
+bool file_valid
+string calibration_version
+string physical_validation
+bool slam_allowed

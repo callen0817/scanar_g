@@ -1,0 +1,10 @@
+float32 overall
+float32 timing
+float32 ptp
+float32 usb_latency
+float32 packet_loss
+float32 registration
+float32 slam_residual
+float32 thermal
+float32 cpu
+float32 memory

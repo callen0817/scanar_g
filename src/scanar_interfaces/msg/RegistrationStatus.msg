@@ -1,0 +1,2 @@
+int32 station_id
+float32 registration_error

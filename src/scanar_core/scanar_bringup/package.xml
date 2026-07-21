@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>scanar_bringup</name>
+  <version>3.16.0</version>
+  <description>ScanAR Unified Launch Orchestrator and Boot Sequence package</description>
+  <maintainer email="scanarstereo@todo.todo">scanarstereo</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>session_manager</exec_depend>
+  <exec_depend>diagnostics</exec_depend>
+  <exec_depend>packet_capture</exec_depend>
+  <exec_depend>continuous_capture</exec_depend>
+  <exec_depend>scanar_slam_bridge</exec_depend>
+  <exec_depend>scanar_verification</exec_depend>
+  <exec_depend>scanar_operator</exec_depend>
+  <exec_depend>viture_hud</exec_depend>
+  <exec_depend>scanar_diagnostics_dashboard</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

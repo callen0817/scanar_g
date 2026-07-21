@@ -1,0 +1,1 @@
+# ScanAR Session Manager Module
