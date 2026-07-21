@@ -243,18 +243,19 @@ class HudRenderer(Node):
         tz = msg.pose.pose.position.z
         
         q = msg.pose.pose.orientation
+        # Compute yaw heading about vertical Y-axis in camera coordinates
         yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            2.0 * (q.w * q.y - q.x * q.z),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z)) + math.pi / 2.0
 
         if len(self.keyplan._trajectory) > 0:
-            self.dist_m += math.hypot(tx - self.pose_pos[0], ty - self.pose_pos[1])
+            self.dist_m += math.hypot(tx - self.pose_pos[0], tz - self.pose_pos[2])
 
         self.pose_pos = np.array([tx, ty, tz])
         self.pose_rot_mat = self.quat_to_rot(q.w, q.x, q.y, q.z)
 
-        # Update pose in floor plan keyplan
-        self.keyplan.update_pose(tx, ty, yaw)
+        # Update pose in floor plan keyplan (X and Z represent floor coordinates)
+        self.keyplan.update_pose(tx, tz, yaw)
 
     def _cb_splats(self, msg: GaussianSplatArray):
         self.gaussian_count = len(msg.splats)
@@ -276,7 +277,7 @@ class HudRenderer(Node):
             colors.append([int(s.b), int(s.g), int(s.r)]) # BGR for OpenCV
             scales.append(s.scale)
             opacities.append(s.opacity)
-            map_points_2d.append((s.x, s.y))
+            map_points_2d.append((s.x, s.z))
 
         self.splat_positions = np.array(positions, dtype=np.float32)
         self.splat_colors = np.array(colors, dtype=np.uint8)
