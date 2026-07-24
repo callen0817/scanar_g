@@ -1,0 +1,10 @@
+{
+  "product": "ScanAR G",
+  "version": "1.0.0",
+  "tracking_engine": "lingbot_map",
+  "model": "lingbot-map.pt",
+  "gui_version": "2.1",
+  "dataset_spec": "1.0_32byte_splat",
+  "odometry_topic": "/scanar/odometry",
+  "reconstruction_topic": "/scanar/reconstruction"
+}

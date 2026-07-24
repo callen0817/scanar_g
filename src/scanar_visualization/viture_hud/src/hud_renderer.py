@@ -4,7 +4,17 @@ hud_renderer.py — ScanAR G Production HUD Renderer
 ======================================================
 ROS2 node that receives live telemetry and renders the operator HUD
 to the connected VITURE glasses display at 60 Hz using OpenCV.
-Features a 3D Gaussian Splat viewer and a real-time 2D floor plan minimap.
+
+Architecture:
+- Main Display: 100% Optical See-Through AR (Black canvas = 0.0 nits emissive light)
+- Right-Side Tool PIP Stack:
+    1. SLAM Map PIP (2D Floorplan, trajectory, heading arrow, point cloud projection)
+    2. RGB Camera PIP (Live 60 FPS RGB stream sensor health monitor)
+    3. Pose/Path PIP (Directional navigation arrow, confidence meter, 6DoF distance)
+- Left-Side: Engineering Overlay (Pinned at X=0, Y=44)
+- Top Bar: Action Buttons + Tool PIP Toggles + Config Switcher ([K] CFG: SCANAR G / SCANAR C)
+- Full Keyboard Hotkeys: R (Record/Stop), X (Reset), S (Save), E (ENG), M (Map), C (RGB), P (Pose), K (Config Cycle), H (Hide All), F (Fullscreen), Q/ESC (Quit)
+- ROS 2 Session Publisher: Publishes session control commands to `/scanar/session/command`
 """
 
 import os
@@ -17,37 +27,40 @@ import collections
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Bool, Float32
-from sensor_msgs.msg import Image
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, qos_profile_sensor_data
+from std_msgs.msg import String, Float32, Bool
+from sensor_msgs.msg import Image, Imu
 from nav_msgs.msg import Odometry
 from scanar_interfaces.msg import ScanConfidence, GaussianSplatArray, SystemHealth, ReconstructionFrame
 from cv_bridge import CvBridge
 
 from hud_widgets.keyplan import KeyplanWidget
+try:
+    from viture_hud.product_capabilities import get_product_capability
+except ImportError:
+    from product_capabilities import get_product_capability
 
 # Display constants
 WIDTH, HEIGHT = 1920, 1080
 FPS           = 60
 DISPLAY       = os.environ.get("DISPLAY", ":1")
 
-# Theme colors (BGR)
-BG_COLOR = (6, 8, 10)
+# Theme colors (BGR) — Pure pitch black (0,0,0) turns Micro-OLED subpixels OFF completely for 0.0 nit AR see-through transparency
+BG_COLOR = (0, 0, 0)
 C_CYAN  = (220, 205,   0)
 C_GREEN = ( 70, 230, 120)
 C_AMBER = (  0, 175, 255)
 C_RED   = ( 55,  55, 240)
 C_WHITE = (235, 235, 235)
 C_DIM   = ( 90,  90,  90)
-C_PANEL = ( 16,  20,  26)
+C_PANEL = ( 0,   0,   0)
 C_EDGE  = ( 50, 185, 205)
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
-# Keyplan geometry — bottom-right corner
+# PIP Stack geometry — Right-side vertical stack
 KP_W = 340
-KP_H = 300
-KP_X = WIDTH  - KP_W - 24
-KP_Y = HEIGHT - KP_H - 60
+KP_X = WIDTH - KP_W - 24  # 1556
 
 LAT_HIST = collections.deque(maxlen=100)
 
@@ -74,7 +87,7 @@ def _get_gpu_load():
     try:
         with open("/sys/class/devfreq/17000000.gpu/device/load", "r") as f:
             return float(f.read().strip()) / 10.0
-    except:
+    except Exception:
         return 15.0
 
 def _get_gpu_memory():
@@ -91,15 +104,15 @@ def _get_gpu_memory():
             used_gb = (total - free) / (1024 * 1024)
             total_gb = total / (1024 * 1024)
             return used_gb, total_gb
-    except:
+    except Exception:
         pass
     return 3.2, 16.0
 
 def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropped_f, profile_name):
-    EX, EY, EW, EH = 20, 56, 360, 520
+    EX, EY, EW, EH = 0, 44, 360, 520
     _panel(frame, EX, EY, EW, EH)
     cv2.putText(frame, "ENGINEERING STATUS", (EX + 10, EY + 18),
-                FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
+                FONT, 0.40, (0, 255, 0), 1, cv2.LINE_AA)
     y = EY + 40
 
     gpu_load = _get_gpu_load()
@@ -120,7 +133,9 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
         y += 26
 
     profile_label = "SCANAR G (GLASSES)"
-    if profile_name == "scanar_s":
+    if profile_name == "scanar_c":
+        profile_label = "SCANAR C (GLOBAL SHUTTER)"
+    elif profile_name == "scanar_s":
         profile_label = "SCANAR S (STEREO)"
     elif profile_name == "scanar_s2":
         profile_label = "SCANAR S2"
@@ -151,38 +166,18 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
     bar("",           temp, 100,       tmp_c)
 
     y += 4
-    # Detailed SLAM stats
-    if profile_name == "scanar_g":
-        row("BACKEND", "LingBot-Map", C_GREEN)
+    if profile_name in ("scanar_g", "scanar_c"):
+        row("ENGINE", "lingbot_map", C_GREEN)
         row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("SURFACE POINTS", f"{stats_db.get('active_splats', 0)} pts", C_WHITE)
+        row("RECON POINTS", f"{stats_db.get('active_splats', 0)} pts", C_CYAN)
     else:
-        row("BACKEND", "VIGS-SLAM" if "scanar_s" in profile_name else "FAST-LIO2", C_GREEN)
+        row("ENGINE", "vigs_slam" if "scanar_s" in profile_name else "fast_lio2", C_GREEN)
         row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
         row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_WHITE)
-        row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_WHITE)
+        row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_CYAN)
+        row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_CYAN)
 
-    row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_WHITE)
-
-    y += 6
-    if len(LAT_HIST) > 2:
-        gx, gy, gw, gh = EX + 14, y, EW - 28, 65
-        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (18, 18, 18), -1)
-        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), C_DIM, 1)
-        vals = list(LAT_HIST)
-        maxv = max(60, max(vals))
-        t33y = gy + gh - int((33.0 / maxv) * gh)
-        cv2.line(frame, (gx, t33y), (gx + gw, t33y), C_GREEN, 1)
-        cv2.putText(frame, "33ms", (gx + 3, t33y - 2), FONT, 0.28, C_GREEN, 1)
-        pts = [(gx + int(i * gw / len(vals)),
-                gy + gh - int((v / maxv) * gh))
-               for i, v in enumerate(vals)]
-        for i in range(1, len(pts)):
-            cv2.line(frame, pts[i - 1], pts[i],
-                     _lat_color(vals[i]), 1, cv2.LINE_AA)
-        cv2.putText(frame, "CUDA FRAME LATENCY HISTORY", (gx, gy - 3),
-                    FONT, 0.28, C_DIM, 1)
+    row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_CYAN)
 
 class HudRenderer(Node):
     def __init__(self):
@@ -195,25 +190,33 @@ class HudRenderer(Node):
         self.vigs_status = "INITIALIZING"
         self.gaussian_count = 0
         self.active_dir = ""
+        self.recording_state = "STBY"  # "STBY", "PREPARING", "RECORDING"
+        self._prep_start_t = 0.0
         
         # System health metrics
         self.cpu_load = 0.0
         self.ram_pct = 0.0
         self.cpu_temp = 0.0
         self.latency_ms = 0.0
-        self.show_eng = False
         self.dist_m = 0.0
         self.calib_ok = True
+        
+        # PIP & Overlay Toggles (Pass-Through AR is ALWAYS the main view)
+        self.show_eng = False
+        self.show_slam_pip = True
+        self.show_rgb_pip = True
+        self.show_pose_pip = True
+        self.is_fullscreen = False
+        self.should_exit = False
         
         # V1.5 statistics & metrics
         self.stats_db = {}
         self.dropped_frames = 0
         self.last_draw_time = time.time()
-        
         self._t_start = time.time()
-
-        # Visual mode (1: Natural RGB, 2: ScanAR Green, 3: Hybrid)
-        self.visual_mode = 1
+        self.mouse_pos = (0, 0)
+        self._last_click_msg = ""
+        self._last_click_t = 0.0
 
         # Keyplan widget — maps the real-time floor plan
         self.keyplan = KeyplanWidget()
@@ -236,14 +239,27 @@ class HudRenderer(Node):
 
         self.bridge = CvBridge()
         self.camera_image = None
+        self.pip_image = None
 
-        # Declare and get product parameter
+        # Declare and get product parameter & capability
         self.declare_parameter('product', 'scanar_g')
         self.product = self.get_parameter('product').get_parameter_value().string_value
+        self.capability = get_product_capability(self.product)
+
+        # Low-latency camera QoS profile (Depth 1, Keep Last, Best Effort)
+        cam_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST
+        )
+
+        # ROS 2 Command Publisher
+        self.pub_cmd = self.create_publisher(String, '/scanar/session/command', 10)
 
         # ROS subscriptions
-        self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, 10)
-        self.create_subscription(Odometry, '/fast_lio/odometry', self._cb_odom, 10)
+        self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, cam_qos)
+        self.create_subscription(Imu, '/viture/imu', self._cb_imu_data, qos_profile_sensor_data)
+        self.create_subscription(Odometry, '/scanar/odometry', self._cb_odom, 10)
         self.create_subscription(ReconstructionFrame, '/scanar/reconstruction', self._cb_reconstruction, 10)
         self.create_subscription(Float32, '/scanar/scan_confidence', self._cb_confidence, 10)
         self.create_subscription(String, '/vigs/status', self._cb_status, 10)
@@ -255,13 +271,63 @@ class HudRenderer(Node):
         self.create_subscription(Bool, '/scanar/hud/eng_mode', self._cb_eng, 10)
         self.create_subscription(String, '/vigs/statistics', self._cb_stats_json, 10)
 
-        self.get_logger().info("ScanAR G V1.5 HUD Renderer Node Initialized.")
+        self.get_logger().info("ScanAR G V1.5 HUD Renderer Node Initialized (Pass-Through AR Mode + PIP Stack).")
+
+    def cycle_product_config(self):
+        configs = ["scanar_g", "scanar_c", "scanar_s", "scanar_l", "scanar_l2", "scanar_pro"]
+        curr_idx = configs.index(self.product) if self.product in configs else 0
+        next_idx = (curr_idx + 1) % len(configs)
+        self.product = configs[next_idx]
+        self.capability = get_product_capability(self.product)
+        self._last_click_msg = f"CONFIGURATION SWITCHED TO: {self.capability.name.upper()}"
+        self._last_click_t = time.time()
+        self.get_logger().info(f"Product configuration switched via HUD -> {self.capability.name}")
+
+    def trigger_action(self, action_id: str):
+        msg = String()
+        msg.data = action_id
+        self.pub_cmd.publish(msg)
+        
+        if action_id in ("start", "rec", "toggle_record", "stop"):
+            if not self.active_dir and self.recording_state != "RECORDING":
+                self.recording_state = "PREPARING"
+                self._prep_start_t = time.time()
+                self._last_click_msg = "INITIALIZING SLAM & RECORDING PIPELINE..."
+                self.get_logger().info("Action -> START SCAN / PREPARING RECORDING")
+            else:
+                self.recording_state = "STBY"
+                self.active_dir = ""
+                self._last_click_msg = "SCAN STOPPED. RECORDING SAVED."
+                self.get_logger().info("Action -> STOP SCAN / RECORDING SAVED")
+        elif action_id == "reset":
+            if hasattr(self, 'keyplan') and self.keyplan is not None:
+                self.keyplan.reset()
+            self.dist_m = 0.0
+            self._last_click_msg = "MINIMAP & TRAJECTORY RESET OK"
+            self.get_logger().info("Action -> RESET MAP")
+        elif action_id == "save":
+            self._last_click_msg = "CAPTURE SESSION SAVED OK"
+            self.get_logger().info("Action -> SAVE CAPTURE")
+        elif action_id == "export":
+            self._last_click_msg = "EXPORTING 3D GAUSSIAN SPLATS (.splat & .ply)..."
+            self.get_logger().info("Action -> EXPORT SPLATS")
+        
+        self._last_click_t = time.time()
 
     def _cb_image(self, msg: Image):
         try:
-            self.camera_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except Exception as e:
+            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            self.camera_image = cv_img
+            # Direct bilinear downsampling for 60 FPS PIP camera monitor (< 30ms latency)
+            self.pip_image = cv2.resize(cv_img, (KP_W, 200), interpolation=cv2.INTER_LINEAR)
+        except Exception:
             pass
+
+    def _cb_imu_data(self, msg: Imu):
+        dt = 0.01
+        gyro_y = msg.angular_velocity.y
+        if hasattr(self, 'keyplan') and self.keyplan is not None:
+            self.keyplan.heading += gyro_y * dt
 
     def _cb_odom(self, msg: Odometry):
         tx = msg.pose.pose.position.x
@@ -269,7 +335,6 @@ class HudRenderer(Node):
         tz = msg.pose.pose.position.z
         
         q = msg.pose.pose.orientation
-        # Compute yaw heading about vertical Y-axis in camera coordinates
         yaw = math.atan2(
             2.0 * (q.w * q.y - q.x * q.z),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)) + math.pi / 2.0
@@ -279,11 +344,11 @@ class HudRenderer(Node):
 
         self.pose_pos = np.array([tx, ty, tz])
         self.pose_rot_mat = self.quat_to_rot(q.w, q.x, q.y, q.z)
-
-        # Update pose in floor plan keyplan (X and Z represent floor coordinates)
         self.keyplan.update_pose(tx, tz, yaw)
 
     def _cb_reconstruction(self, msg: ReconstructionFrame):
+        if msg.tracking_engine:
+            self.tracking_engine = msg.tracking_engine
         self.gaussian_count = len(msg.x)
         if self.gaussian_count == 0:
             self.splat_positions = np.zeros((0, 3), dtype=np.float32)
@@ -306,7 +371,11 @@ class HudRenderer(Node):
         self.splat_opacities = np.ones((self.gaussian_count,), dtype=np.float32) * 1.0
 
         map_points_2d = list(zip(msg.x, msg.z))
-        self.keyplan.update_map_points(map_points_2d)
+        if self.capability.color_mode == "natural":
+            map_colors_bgr = list(zip(msg.b, msg.g, msg.r))
+            self.keyplan.update_map_points(map_points_2d, colors=map_colors_bgr)
+        else:
+            self.keyplan.update_map_points(map_points_2d, colors=None)
 
     def _cb_confidence(self, msg: Float32):
         self.confidence = msg.data
@@ -322,6 +391,8 @@ class HudRenderer(Node):
 
     def _cb_active_dir(self, msg: String):
         self.active_dir = msg.data
+        if self.active_dir:
+            self.recording_state = "RECORDING"
 
     def _cb_health(self, msg: SystemHealth):
         self.cpu_load = msg.cpu_load
@@ -346,23 +417,22 @@ class HudRenderer(Node):
             pass
 
     def draw(self, frame: np.ndarray) -> None:
-        # Calculate dropped frames
         now = time.time()
         dt = now - self.last_draw_time
         self.last_draw_time = now
         if dt > 1.5 * (1.0 / 60.0):
             self.dropped_frames += int(dt / (1.0 / 60.0)) - 1
 
-        # Clear screen to BG_COLOR or copy real camera feed
-        if self.visual_mode in (1, 3) and self.camera_image is not None:
-            if self.camera_image.shape[1] == WIDTH and self.camera_image.shape[0] == HEIGHT:
-                np.copyto(frame, self.camera_image)
-            else:
-                cv2.resize(self.camera_image, (WIDTH, HEIGHT), dst=frame)
-        else:
-            frame[:] = BG_COLOR
+        # 100% Optical See-Through AR: Pitch black background (0,0,0) turns Micro-OLED subpixels OFF completely
+        frame[:] = BG_COLOR
 
-        # 1. Project and render 3D Gaussian Splats
+        # Transition from PREPARING to RECORDING state after 1.5s simulation if no active_dir callback received
+        if self.recording_state == "PREPARING" and (now - self._prep_start_t) > 1.5:
+            self.recording_state = "RECORDING"
+            if not self.active_dir:
+                self.active_dir = "/tmp/scanar_session_active"
+
+        # 1. Project and render 3D Gaussian Splats over 100% See-Through AR Passthrough
         if len(self.splat_positions) > 0:
             rel_pos = self.splat_positions - self.pose_pos
             p_cam = rel_pos @ self.pose_rot_mat
@@ -372,7 +442,6 @@ class HudRenderer(Node):
                 p_cam_filt = p_cam[mask]
                 colors_filt = self.splat_colors[mask]
                 scales_filt = self.splat_scales[mask]
-                opacities_filt = self.splat_opacities[mask]
 
                 u = (self.fx * p_cam_filt[:, 0] / p_cam_filt[:, 2]) + self.cx
                 v = (self.fy * p_cam_filt[:, 1] / p_cam_filt[:, 2]) + self.cy
@@ -386,92 +455,178 @@ class HudRenderer(Node):
                     scale_scr = scales_filt[screen_mask]
 
                     sort_idx = np.argsort(z_scr)[::-1]
-
                     for idx in sort_idx:
                         px = int(u_scr[idx])
                         py = int(v_scr[idx])
-                        if self.product == 'scanar_g':
+                        if self.product in ('scanar_g', 'scanar_c'):
                             r_pix = 2
                         else:
                             r_pix = int((scale_scr[idx] * self.fx) / z_scr[idx])
                             r_pix = max(2, min(r_pix, 150))
-
-                        if self.visual_mode == 1:
-                            color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
-                        elif self.visual_mode == 2:
-                            intensity = int(120 + 135 * (self.confidence / 100.0))
-                            color = (50, intensity, 50)
-                        else:
-                            color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
-
-                        if self.visual_mode == 3:
-                            cv2.circle(frame, (px, py), r_pix + 2, (30, 180, 50), 1, cv2.LINE_AA)
-                        
+                        color = (int(col_scr[idx][0]), int(col_scr[idx][1]), int(col_scr[idx][2]))
                         cv2.circle(frame, (px, py), r_pix, color, -1, cv2.LINE_AA)
 
-        # 2. Render Top Strip Dashboard
-        ov = frame.copy()
-        cv2.rectangle(ov, (0, 0), (WIDTH, 44), C_PANEL, -1)
-        cv2.addWeighted(ov, 0.78, frame, 0.22, 0, frame)
+        # 2. Render Top Strip Dashboard (Transparent glass bar with cyan bottom border)
+        cv2.rectangle(frame, (0, 0), (WIDTH, 44), (0, 0, 0), -1)
         cv2.line(frame, (0, 44), (WIDTH, 44), C_EDGE, 1)
 
-        # REC indicator
-        rec_col = _blink(C_RED, C_DIM, hz=1.5) if self.active_dir else C_DIM
-        cv2.circle(frame, (24, 22), 9, rec_col, -1)
-        cv2.putText(frame, "REC" if self.active_dir else "STBY", (40, 28), FONT, 0.46, rec_col, 1, cv2.LINE_AA)
+        # REC / PREP / STBY indicator
+        if self.recording_state == "RECORDING" or self.active_dir:
+            rec_col = _blink(C_RED, C_DIM, hz=1.5)
+            rec_lbl = "REC"
+        elif self.recording_state == "PREPARING":
+            rec_col = _blink(C_AMBER, C_GREEN, hz=3.0)
+            rec_lbl = "PREP"
+        else:
+            rec_col = C_DIM
+            rec_lbl = "STBY"
 
-        # Confidence Rating (LOST, LOW, MEDIUM, HIGH)
+        cv2.circle(frame, (24, 22), 9, rec_col, -1)
+        cv2.putText(frame, rec_lbl, (40, 28), FONT, 0.46, rec_col, 1, cv2.LINE_AA)
+
+        # Configuration Rating (SCANAR G / C: HIGH)
         conf_str = "LOST"
         conf_col = C_RED
         if self.confidence >= 90.0:
             conf_str = "HIGH"
-            conf_col = C_GREEN
+            conf_col = (0, 255, 0)
         elif self.confidence >= 70.0:
             conf_str = "MEDIUM"
             conf_col = C_CYAN
         elif self.confidence >= 40.0:
             conf_str = "LOW"
-            conf_col = C_AMBER
+            conf_col = (0, 255, 0)
 
+        config_name = self.capability.name.upper()
         cv2.circle(frame, (118, 22), 6, conf_col, -1)
-        cv2.putText(frame, f"VIGS: {conf_str}", (132, 28), FONT, 0.44, conf_col, 1, cv2.LINE_AA)
+        cv2.putText(frame, f"{config_name}: {conf_str}", (132, 28), FONT, 0.44, conf_col, 1, cv2.LINE_AA)
 
-        # Title
-        cv2.putText(frame, "SCANAR  G  V1.5", (WIDTH // 2 - 95, 29), FONT, 0.52, C_CYAN, 1, cv2.LINE_AA)
+        # PIP & Overlay Toggle Buttons + Configuration Cycle Button on Top Bar
+        toggle_buttons = [
+            ("eng", "[E] ENG", 300, 75, self.show_eng),
+            ("map", "[M] MAP", 385, 85, self.show_slam_pip),
+            ("rgb", "[C] RGB", 480, 80, self.show_rgb_pip and self.capability.has_rgb_camera),
+            ("pose", "[P] POSE", 570, 85, self.show_pose_pip),
+            ("cfg", f"[K] CFG: {config_name}", 665, 160, True),
+        ]
 
-        # Calibration state
-        calib_txt = "CALIB ✓" if self.calib_ok else "CALIB —"
-        calib_col = C_GREEN if self.calib_ok else C_DIM
-        cv2.putText(frame, calib_txt, (WIDTH // 2 + 120, 29), FONT, 0.40, calib_col, 1, cv2.LINE_AA)
+        for t_id, t_label, bx, bw, is_act in toggle_buttons:
+            btn_col = C_CYAN if t_id == "cfg" else ((0, 255, 0) if is_act else C_CYAN)
+            lbl_txt = t_label if t_id == "cfg" else (f"{t_label} ✓" if is_act else t_label)
+            cv2.rectangle(frame, (bx, 8), (bx + bw, 36), (0, 0, 0), -1)
+            cv2.rectangle(frame, (bx, 8), (bx + bw, 36), btn_col, 1)
+            cv2.putText(frame, lbl_txt, (bx + 8, 26), FONT, 0.35, btn_col, 1, cv2.LINE_AA)
 
-        # Latency & Distance
-        lat_txt = f"LAT {self.latency_ms:.0f}ms   {self.dist_m:.0f}m"
-        lw, _ = cv2.getTextSize(lat_txt, FONT, 0.44, 1)[0]
-        cv2.putText(frame, lat_txt, (WIDTH - lw - 20, 28), FONT, 0.44, C_WHITE, 1, cv2.LINE_AA)
+        # Action Menu Buttons on Right Side
+        rec_btn_lbl = "STOP REC" if (self.active_dir or self.recording_state == "RECORDING") else ("PREPARING..." if self.recording_state == "PREPARING" else "START REC")
+        rec_btn_col = C_RED if (self.active_dir or self.recording_state == "RECORDING") else (C_AMBER if self.recording_state == "PREPARING" else (0, 255, 0))
 
-        # 3. Real-Time 2D Floor Plan minimap
-        self.keyplan.draw(frame, KP_X, KP_Y, KP_W, KP_H)
+        action_buttons = [
+            ("rec", rec_btn_lbl, 1420, 130, rec_btn_col),
+            ("reset", "RESET MAP", 1560, 105, C_CYAN),
+            ("save", "SAVE", 1675, 75, C_CYAN),
+            ("export", "EXPORT", 1760, 90, C_CYAN),
+        ]
 
-        # 4. Mode Help Panel
-        b_panel_w, b_panel_h = 360, 115
-        _panel_x, _panel_y = 20, HEIGHT - b_panel_h - 60
-        ov_b = frame.copy()
-        cv2.rectangle(ov_b, (_panel_x, _panel_y), (_panel_x + b_panel_w, _panel_y + b_panel_h), C_PANEL, -1)
-        cv2.addWeighted(ov_b, 0.8, frame, 0.2, 0, frame)
-        cv2.rectangle(frame, (_panel_x, _panel_y), (_panel_x + b_panel_w, _panel_y + b_panel_h), C_EDGE, 1)
+        for act_id, act_label, bx, bw, act_col in action_buttons:
+            cv2.rectangle(frame, (bx, 8), (bx + bw, 36), (0, 0, 0), -1)
+            cv2.rectangle(frame, (bx, 8), (bx + bw, 36), act_col, 1)
+            cv2.putText(frame, act_label, (bx + 8, 26), FONT, 0.34, act_col, 1, cv2.LINE_AA)
 
-        cv2.putText(frame, "HUD CONTROLS", (_panel_x + 10, _panel_y + 20), FONT, 0.40, C_CYAN, 1, cv2.LINE_AA)
-        cv2.putText(frame, "[1] Natural RGB Mode", (_panel_x + 15, _panel_y + 40), FONT, 0.36, C_WHITE if self.visual_mode == 1 else C_DIM, 1, cv2.LINE_AA)
-        cv2.putText(frame, "[2] ScanAR Green Mode", (_panel_x + 15, _panel_y + 60), FONT, 0.36, C_WHITE if self.visual_mode == 2 else C_DIM, 1, cv2.LINE_AA)
-        cv2.putText(frame, "[3] Hybrid View Mode", (_panel_x + 15, _panel_y + 80), FONT, 0.36, C_WHITE if self.visual_mode == 3 else C_DIM, 1, cv2.LINE_AA)
-        cv2.putText(frame, "[E] Toggle Engineering Overlay", (_panel_x + 15, _panel_y + 100), FONT, 0.36, C_WHITE if self.show_eng else C_DIM, 1, cv2.LINE_AA)
+        # Click Confirmation Visual Flash Banner
+        if hasattr(self, '_last_click_msg') and time.time() - self._last_click_t < 2.5:
+            cv2.rectangle(frame, (WIDTH // 2 - 300, 48), (WIDTH // 2 + 300, 84), (0, 0, 0), -1)
+            cv2.rectangle(frame, (WIDTH // 2 - 300, 48), (WIDTH // 2 + 300, 84), (0, 255, 0), 2)
+            cv2.putText(frame, self._last_click_msg, (WIDTH // 2 - 285, 72), FONT, 0.48, (0, 255, 0), 2, cv2.LINE_AA)
 
-        # 5. Engineering Overlay (Left side)
+        # High-Contrast Bold Hover Tooltip Popup Rendering (Positioned safely at Y=52)
+        tooltip_txt = None
+        if hasattr(self, 'mouse_pos') and self.mouse_pos is not None:
+            mx, my = self.mouse_pos
+            if 0 <= my <= 44:
+                if 300 <= mx <= 375:
+                    tooltip_txt = "Toggle real-time CPU, RAM, IMU & SLAM engineering metrics panel."
+                elif 385 <= mx <= 470:
+                    tooltip_txt = "Toggle live 2D SLAM floorplan & trajectory PIP map."
+                elif 480 <= mx <= 560:
+                    tooltip_txt = "Toggle live 60 FPS RGB camera feed PIP monitor."
+                elif 570 <= mx <= 655:
+                    tooltip_txt = "Toggle navigation directional arrow & 6DoF pose PIP window."
+                elif 665 <= mx <= 825:
+                    tooltip_txt = "Cycle product profile (ScanAR G, ScanAR C, ScanAR S, ScanAR L) (Hotkey: K)."
+                elif 1420 <= mx <= 1550:
+                    tooltip_txt = "Start or stop continuous dataset session recording (Hotkey: R)."
+                elif 1560 <= mx <= 1665:
+                    tooltip_txt = "Reset 2D minimap & clear trajectory path (Hotkey: X)."
+                elif 1675 <= mx <= 1750:
+                    tooltip_txt = "Save current capture session state (Hotkey: S)."
+                elif 1760 <= mx <= 1850:
+                    tooltip_txt = "Export 3D Gaussian Splats (.splat & .ply) (Hotkey: E)."
+
+        if tooltip_txt:
+            tt_w = len(tooltip_txt) * 10 + 30
+            tx = max(10, min(mx, WIDTH - tt_w - 10))
+            ty = 52
+            cv2.rectangle(frame, (tx, ty), (tx + tt_w, ty + 36), (0, 0, 0), -1)
+            cv2.rectangle(frame, (tx, ty), (tx + tt_w, ty + 36), (0, 255, 0), 2)
+            cv2.putText(frame, tooltip_txt, (tx + 12, ty + 24), FONT, 0.50, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # 3. RIGHT-SIDE TOOL PIP STACK
+        # (A) Top PIP: SLAM Map PIP (2D Floorplan, Trajectory, Point Cloud Projection)
+        if self.show_slam_pip:
+            pip_slam_y = 60
+            pip_slam_h = 240
+            cv2.putText(frame, "LIVE SLAM MAP PIP", (KP_X, pip_slam_y - 6), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+            self.keyplan.draw(frame, KP_X, pip_slam_y, KP_W, pip_slam_h)
+
+        # (B) Middle PIP: Live 60 FPS RGB Camera PIP Monitor
+        if self.show_rgb_pip and self.capability.has_rgb_camera:
+            pip_rgb_y = 320
+            pip_rgb_h = 200
+            cv2.putText(frame, "LIVE RGB STREAM (60 FPS)", (KP_X, pip_rgb_y - 6), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+            if self.pip_image is not None and self.pip_image.shape[:2] == (pip_rgb_h, KP_W):
+                frame[pip_rgb_y:pip_rgb_y + pip_rgb_h, KP_X:KP_X + KP_W] = self.pip_image
+            else:
+                cv2.rectangle(frame, (KP_X, pip_rgb_y), (KP_X + KP_W, pip_rgb_y + pip_rgb_h), (20, 20, 20), -1)
+                cv2.putText(frame, "NO RGB CAMERA FEED", (KP_X + 60, pip_rgb_y + 100), FONT, 0.42, C_DIM, 1, cv2.LINE_AA)
+            cv2.rectangle(frame, (KP_X, pip_rgb_y), (KP_X + KP_W, pip_rgb_y + pip_rgb_h), C_EDGE, 1)
+
+        # (C) Bottom PIP: Pose & Trajectory HUD PIP
+        if self.show_pose_pip:
+            pip_pose_y = 540
+            pip_pose_h = 180
+            _panel(frame, KP_X, pip_pose_y, KP_W, pip_pose_h)
+            cv2.putText(frame, "POSE & TRAJECTORY PIP", (KP_X + 10, pip_pose_y + 20), FONT, 0.40, (0, 255, 0), 1, cv2.LINE_AA)
+            
+            # Draw Directional Navigation Arrow
+            cx_arrow = KP_X + 60
+            cy_arrow = pip_pose_y + 100
+            yaw = getattr(self.keyplan, 'heading', 0.0)
+            a_len = 35
+            tip_x = int(cx_arrow + a_len * math.sin(yaw))
+            tip_y = int(cy_arrow - a_len * math.cos(yaw))
+            
+            # Triangle base
+            b1_x = int(cx_arrow + 14 * math.sin(yaw + 2.4))
+            b1_y = int(cy_arrow - 14 * math.cos(yaw + 2.4))
+            b2_x = int(cx_arrow + 14 * math.sin(yaw - 2.4))
+            b2_y = int(cy_arrow - 14 * math.cos(yaw - 2.4))
+            
+            arrow_pts = np.array([[tip_x, tip_y], [b1_x, b1_y], [b2_x, b2_y]], np.int32)
+            cv2.fillPoly(frame, [arrow_pts], (0, 255, 0), cv2.LINE_AA)
+            cv2.polylines(frame, [arrow_pts], True, C_WHITE, 1, cv2.LINE_AA)
+            
+            # Pose telemetry details
+            cv2.putText(frame, f"CONFIDENCE: {self.confidence:.0f}%", (KP_X + 130, pip_pose_y + 60), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+            cv2.putText(frame, f"DISTANCE: {self.dist_m:.1f} m", (KP_X + 130, pip_pose_y + 90), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+            cv2.putText(frame, f"LATENCY: {self.latency_ms:.0f} ms", (KP_X + 130, pip_pose_y + 120), FONT, 0.38, C_GREEN if self.latency_ms < 50 else C_AMBER, 1, cv2.LINE_AA)
+            cv2.putText(frame, f"POSE XYZ: [{self.pose_pos[0]:.1f}, {self.pose_pos[1]:.1f}, {self.pose_pos[2]:.1f}]", (KP_X + 130, pip_pose_y + 150), FONT, 0.34, C_WHITE, 1, cv2.LINE_AA)
+
+        # 4. LEFT-SIDE: Engineering Overlay (Pinned at X=0, Y=44)
         if self.show_eng:
             _draw_engineering(frame, self.cpu_load, self.ram_pct, self.cpu_temp, self.latency_ms, self.confidence, self.stats_db, self.dropped_frames, self.product)
-            cv2.putText(frame, "[ENG MODE ON]", (20, HEIGHT - 50), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
 
-        # 6. Warnings overlay
+        # 5. Warnings overlay
         if self.confidence < 70:
             wc = _blink(C_AMBER, C_DIM, hz=1.2)
             cv2.putText(frame, "⚠  SLAM QUALITY DEGRADED — SLOW DOWN",
@@ -480,16 +635,13 @@ class HudRenderer(Node):
             cv2.putText(frame, "⚠  HIGH TEMPERATURE",
                         (WIDTH // 2 - 160, HEIGHT // 2 + 50), FONT, 0.65, _blink(C_RED, C_DIM), 2, cv2.LINE_AA)
 
-        # 7. Bottom Status Bar
-        bov = frame.copy()
-        cv2.rectangle(bov, (0, HEIGHT - 34), (WIDTH, HEIGHT), C_PANEL, -1)
-        cv2.addWeighted(bov, 0.75, frame, 0.25, 0, frame)
+        # 6. Bottom Status Bar (Floating neon text over 100% transparent space)
         elapsed = time.time() - self._t_start
         ts = time.strftime("%H:%M:%S")
         cv2.putText(frame,
                     f"ScanAR G V1.5  ·  {ts}  ·  "
-                    f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d} elapsed",
-                    (16, HEIGHT - 10), FONT, 0.38, C_DIM, 1, cv2.LINE_AA)
+                    f"{int(elapsed // 60):02d}:{int(elapsed % 60):02d} elapsed  ·  [K] Switch Config  [H] Hide PIPs  [F] Fullscreen  [Q] Quit",
+                    (16, HEIGHT - 10), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
 
     def quat_to_rot(self, qw, qx, qy, qz):
         R = np.zeros((3, 3), dtype=np.float32)
@@ -506,38 +658,150 @@ class HudRenderer(Node):
         R[2, 2] = 1 - 2 * (qx**2 + qy**2)
         return R
 
+    def on_mouse_click(self, event, x, y, flags, param):
+        self.mouse_pos = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.get_logger().info(f"Mouse clicked at coords: x={x}, y={y}")
+            if 0 <= y <= 60:
+                # PIP & Overlay Toggles
+                if 300 <= x <= 375:
+                    self.show_eng = not self.show_eng
+                    self._last_click_msg = f"ACTION: ENG PANEL {'ON' if self.show_eng else 'OFF'}"
+                    self._last_click_t = time.time()
+                    return
+                elif 385 <= x <= 470:
+                    self.show_slam_pip = not self.show_slam_pip
+                    self._last_click_msg = f"ACTION: SLAM MAP PIP {'ON' if self.show_slam_pip else 'OFF'}"
+                    self._last_click_t = time.time()
+                    return
+                elif 480 <= x <= 560:
+                    self.show_rgb_pip = not self.show_rgb_pip
+                    self._last_click_msg = f"ACTION: RGB STREAM PIP {'ON' if self.show_rgb_pip else 'OFF'}"
+                    self._last_click_t = time.time()
+                    return
+                elif 570 <= x <= 655:
+                    self.show_pose_pip = not self.show_pose_pip
+                    self._last_click_msg = f"ACTION: POSE PIP {'ON' if self.show_pose_pip else 'OFF'}"
+                    self._last_click_t = time.time()
+                    return
+                elif 665 <= x <= 825:
+                    self.cycle_product_config()
+                    return
+
+                # Action buttons on right side
+                elif 1420 <= x <= 1550:
+                    self.trigger_action("start")
+                    return
+                elif 1560 <= x <= 1665:
+                    self.trigger_action("reset")
+                    return
+                elif 1675 <= x <= 1750:
+                    self.trigger_action("save")
+                    return
+                elif 1760 <= x <= 1850:
+                    self.trigger_action("export")
+                    return
+
 def main(args=None):
     rclpy.init(args=args)
     node = HudRenderer()
 
     window = "ScanAR G — HUD"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(window, cv2.WINDOW_GUI_NORMAL)
     cv2.resizeWindow(window, WIDTH, HEIGHT)
+
+    def _on_mouse(event, x, y, flags, param):
+        try:
+            w_rect = cv2.getWindowImageRect(window)
+            if w_rect[2] > 0 and w_rect[3] > 0:
+                x = int(x * (WIDTH / float(w_rect[2])))
+                y = int(y * (HEIGHT / float(w_rect[3])))
+        except Exception:
+            pass
+        node.on_mouse_click(event, x, y, flags, param)
 
     frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
     delay_ms = max(1, int(1000 / FPS))
+    mouse_cb_set = False
 
     try:
-        while rclpy.ok():
+        while rclpy.ok() and not node.should_exit:
             rclpy.spin_once(node, timeout_sec=0.0)
             node.draw(frame)
             cv2.imshow(window, frame)
             
+            # Handle window fullscreen toggle
+            if hasattr(node, 'is_fullscreen'):
+                if node.is_fullscreen:
+                    cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                else:
+                    cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+
             key = cv2.waitKey(delay_ms) & 0xFF
+
+            if not mouse_cb_set:
+                try:
+                    cv2.setMouseCallback(window, _on_mouse)
+                    mouse_cb_set = True
+                except Exception:
+                    pass
+
             if key in (ord('q'), ord('Q'), 27):
                 break
-            elif key == ord('1'):
-                node.visual_mode = 1
-                node.get_logger().info("HUD Mode set to: NATURAL RGB")
-            elif key == ord('2'):
-                node.visual_mode = 2
-                node.get_logger().info("HUD Mode set to: SCANAR GREEN")
-            elif key == ord('3'):
-                node.visual_mode = 3
-                node.get_logger().info("HUD Mode set to: HYBRID")
+            elif key in (ord('r'), ord('R')):
+                node.trigger_action("start")
+            elif key in (ord('x'), ord('X')):
+                node.trigger_action("reset")
+            elif key in (ord('s'), ord('S')):
+                node.trigger_action("save")
+            elif key in (ord('k'), ord('K')):
+                node.cycle_product_config()
             elif key in (ord('e'), ord('E')):
                 node.show_eng = not node.show_eng
-                node.get_logger().info(f"HUD Engineering Mode toggled: {node.show_eng}")
+                node._last_click_msg = f"HOTKEY [E]: ENG OVERLAY {'ON' if node.show_eng else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key in (ord('m'), ord('M')):
+                node.show_slam_pip = not node.show_slam_pip
+                node._last_click_msg = f"HOTKEY [M]: SLAM MAP PIP {'ON' if node.show_slam_pip else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key in (ord('c'), ord('C')):
+                node.show_rgb_pip = not node.show_rgb_pip
+                node._last_click_msg = f"HOTKEY [C]: RGB STREAM PIP {'ON' if node.show_rgb_pip else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key in (ord('p'), ord('P')):
+                node.show_pose_pip = not node.show_pose_pip
+                node._last_click_msg = f"HOTKEY [P]: POSE PIP {'ON' if node.show_pose_pip else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key in (ord('h'), ord('H')):
+                all_on = not (node.show_slam_pip or node.show_rgb_pip or node.show_pose_pip or node.show_eng)
+                node.show_slam_pip = all_on
+                node.show_rgb_pip = all_on
+                node.show_pose_pip = all_on
+                node.show_eng = all_on
+                node._last_click_msg = f"HOTKEY [H]: ALL PIPS {'SHOWN' if all_on else 'HIDDEN'}"
+                node._last_click_t = time.time()
+            elif key in (ord('f'), ord('F')):
+                node.is_fullscreen = not node.is_fullscreen
+                node._last_click_msg = f"HOTKEY [F]: FULLSCREEN {'ON' if node.is_fullscreen else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key == ord('0'):
+                node.show_slam_pip = True
+                node.show_rgb_pip = True
+                node.show_pose_pip = True
+                node._last_click_msg = "HOTKEY [0]: DEFAULT PASSTHROUGH VIEW (ALL PIPS ACTIVE)"
+                node._last_click_t = time.time()
+            elif key == ord('1'):
+                node.show_rgb_pip = not node.show_rgb_pip
+                node._last_click_msg = f"HOTKEY [1]: RGB PIP {'ON' if node.show_rgb_pip else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key == ord('2'):
+                node.show_slam_pip = not node.show_slam_pip
+                node._last_click_msg = f"HOTKEY [2]: SLAM MAP PIP {'ON' if node.show_slam_pip else 'OFF'}"
+                node._last_click_t = time.time()
+            elif key == ord('3'):
+                node.show_pose_pip = not node.show_pose_pip
+                node._last_click_msg = f"HOTKEY [3]: POSE PIP {'ON' if node.show_pose_pip else 'OFF'}"
+                node._last_click_t = time.time()
     except KeyboardInterrupt:
         pass
     finally:

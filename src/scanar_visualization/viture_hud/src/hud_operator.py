@@ -37,8 +37,8 @@ import collections
 WIDTH, HEIGHT = 1920, 1080
 FPS           = 60
 
-# Near-black — simulates AR passthrough (real world shows through)
-BG_COLOR = (6, 8, 10)
+# Pure pitch black (0,0,0) turns Micro-OLED subpixels OFF completely for 0.0 nit AR see-through transparency
+BG_COLOR = (0, 0, 0)
 
 # AR palette (BGR)
 C_CYAN   = (220, 205,   0)
@@ -47,7 +47,7 @@ C_AMBER  = (  0, 175, 255)
 C_RED    = ( 55,  55, 240)
 C_WHITE  = (235, 235, 235)
 C_DIM    = ( 90,  90,  90)
-C_PANEL  = ( 16,  20,  26)
+C_PANEL  = ( 0,   0,   0)
 C_EDGE   = ( 50, 185, 205)
 C_TRAJ   = (  0, 220, 255)   # trajectory — bright yellow/cyan
 C_PT     = ( 55, 200, 100)   # accumulated scan points — muted green
@@ -67,7 +67,7 @@ _wx_min = _wy_min = -1.0
 _wx_max = _wy_max =  1.0
 
 
-def _update_bounds(wx, wy, pad=8.0):
+def _update_bounds(wx, wy, pad=0.5):
     global _wx_min, _wy_min, _wx_max, _wy_max
     _wx_min = min(_wx_min, wx - pad)
     _wy_min = min(_wy_min, wy - pad)
@@ -150,19 +150,18 @@ def emit_scan(rx, ry, n=120):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def panel(frame, x, y, w, h, alpha=0.82):
-    ov = frame.copy()
-    cv2.rectangle(ov, (x, y), (x + w, y + h), C_PANEL, -1)
-    cv2.addWeighted(ov, alpha, frame, 1 - alpha, 0, frame)
+def panel(frame, x, y, w, h, alpha=0.0):
+    # Pure pitch black (0,0,0) transparent glass panel with neon cyan border
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 0), -1)
     cv2.rectangle(frame, (x, y), (x + w, y + h), C_EDGE, 1)
 
 
 def hbar(frame, x, y, w, h, val, maxv, col):
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (30, 30, 30), -1)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 0), -1)
     fill = int(w * min(val, maxv) / maxv)
     if fill > 0:
         cv2.rectangle(frame, (x, y), (x + fill, y + h), col, -1)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), C_DIM, 1)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), C_EDGE, 1)
 
 
 def blink(ca, cb, hz=1.0):
@@ -193,10 +192,12 @@ def draw_keyplan(frame, rx, ry, heading, traj_pts, scan_pts_2d):
     # Accumulated scan points (subsample for performance)
     step = max(1, len(scan_pts_2d) // 12000)
     for i in range(0, len(scan_pts_2d), step):
-        wx, wy = scan_pts_2d[i]
+        pt_data = scan_pts_2d[i]
+        wx, wy = pt_data[0], pt_data[1]
+        c = pt_data[2] if len(pt_data) >= 3 else C_PT
         px, py, _ = w2m(wx, wy)
         if MAP_X <= px < MAP_X + MAP_PX and MAP_Y <= py < MAP_Y + MAP_PH:
-            frame[py, px] = C_PT
+            frame[py, px] = c
 
     # Trajectory path with age fade
     if len(traj_pts) > 1:
@@ -211,20 +212,56 @@ def draw_keyplan(frame, rx, ry, heading, traj_pts, scan_pts_2d):
             c = tuple(int(v * (0.3 + 0.7 * age)) for v in C_TRAJ)
             cv2.line(frame, tmapped[i - 1], tmapped[i], c, 1, cv2.LINE_AA)
 
-    # Robot icon + heading arrow
+    # Single Solid Navigation Triangle (Vibrant Electric Green, flat back base centered on path line)
     rpx, rpy, scale = w2m(rx, ry)
-    arrow_len = max(8, int(4 * scale))
-    ax = int(rpx + arrow_len * math.cos(heading))
-    ay = int(rpy - arrow_len * math.sin(heading))
     if MAP_X < rpx < MAP_X + MAP_PX and MAP_Y < rpy < MAP_Y + MAP_PH:
-        cv2.arrowedLine(frame, (rpx, rpy), (ax, ay),
-                        C_WHITE, 2, tipLength=0.45, line_type=cv2.LINE_AA)
-        cv2.circle(frame, (rpx, rpy), 5, C_WHITE, -1)
-        cv2.circle(frame, (rpx, rpy), 5, C_CYAN, 1)
+        L = 21 # Pointer length facing forward along heading (21px)
+        W = 13 # Half-width of flat base anchored to path line (13px)
+        
+        cos_h = math.cos(heading)
+        sin_h = math.sin(heading)
+
+        # Forward tip position along direction of travel
+        tip_x = int(rpx + L * cos_h)
+        tip_y = int(rpy - L * sin_h)
+
+        # Back left and back right corners forming the flat base anchored on the path line
+        base_left_x = int(rpx - W * sin_h)
+        base_left_y = int(rpy - W * cos_h)
+
+        base_right_x = int(rpx + W * sin_h)
+        base_right_y = int(rpy + W * cos_h)
+
+        pts_triangle = np.array([[tip_x, tip_y], [base_left_x, base_left_y], [base_right_x, base_right_y]], dtype=np.int32)
+        cv2.fillPoly(frame, [pts_triangle], (0, 255, 0), lineType=cv2.LINE_AA) # Solid Vibrant Electric Green Fill (BGR)
+        cv2.polylines(frame, [pts_triangle], True, C_CYAN, 2, lineType=cv2.LINE_AA) # Crisp 2-px Neon Cyan Outline
 
     # Border
     cv2.rectangle(frame, (MAP_X, MAP_Y),
                   (MAP_X + MAP_PX, MAP_Y + MAP_PH), C_EDGE, 1)
+
+
+# ---------------------------------------------------------------------------
+# Live RGB Camera PIP Monitor (positioned above map)
+# ---------------------------------------------------------------------------
+
+def draw_rgb_pip(frame, camera_img):
+    pip_w, pip_h = MAP_PX, 200
+    pip_x, pip_y = MAP_X, MAP_Y - pip_h - 40
+    
+    panel(frame, pip_x - 8, pip_y - 26, pip_w + 16, pip_h + 34)
+    cv2.putText(frame, "LIVE RGB STREAM (30 FPS)", (pip_x - 2, pip_y - 10),
+                FONT, 0.42, C_CYAN, 1, cv2.LINE_AA)
+                
+    if camera_img is not None and camera_img.size > 0:
+        resized_cam = cv2.resize(camera_img, (pip_w, pip_h))
+        frame[pip_y:pip_y + pip_h, pip_x:pip_x + pip_w] = resized_cam
+    else:
+        cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), (5, 8, 6), -1)
+        cv2.putText(frame, "OPTICAL SEE-THROUGH AR ACTIVE", (pip_x + 20, pip_y + 105),
+                    FONT, 0.38, C_DIM, 1, cv2.LINE_AA)
+                    
+    cv2.rectangle(frame, (pip_x, pip_y), (pip_x + pip_w, pip_y + pip_h), C_EDGE, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +277,7 @@ def draw_engineering(frame, cpu, ram, temp, imu_hz, lat_ms, packets, conf):
 
     y = EY + 40
 
-    def row(label, val, col=C_WHITE):
+    def row(label, val, col=C_CYAN):
         nonlocal y
         cv2.putText(frame, label,  (EX + 14, y), FONT, 0.37, C_DIM, 1, cv2.LINE_AA)
         cv2.putText(frame, val,    (EX + 185, y), FONT, 0.39, col,   1, cv2.LINE_AA)
@@ -272,14 +309,13 @@ def draw_engineering(frame, cpu, ram, temp, imu_hz, lat_ms, packets, conf):
     row("LATENCY",    f"{lat_ms:.1f} ms",   lat_color(lat_ms))
     row("CONFIDENCE", f"{conf:.0f}%",
         C_GREEN if conf >= 80 else C_AMBER)
-    row("PACKETS",    f"{packets:,}",        C_WHITE)
+    row("PACKETS",    f"{packets:,}",        C_CYAN)
 
     y += 10
     # Latency mini-graph
     if len(LAT_HIST) > 2:
-        gx, gy, gw, gh = EX + 14, y, EW - 28, 80
-        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (18, 18, 18), -1)
-        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), C_DIM, 1)
+        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (0, 0, 0), -1)
+        cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), C_EDGE, 1)
         vals = list(LAT_HIST)
         maxv = max(60, max(vals))
         t33y = gy + gh - int((33.0 / maxv) * gh)

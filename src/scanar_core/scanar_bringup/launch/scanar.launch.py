@@ -5,36 +5,39 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+# Configure FastDDS Shared Memory (SHM) zero-copy transport for local nodes
+shm_profile = "/home/scanarstereo/scanAR_G/fastdds_shm.xml"
+if os.path.exists(shm_profile):
+    os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = shm_profile
+
 def launch_setup(context, *args, **kwargs):
     mode = LaunchConfiguration('mode').perform(context)
     product_val = LaunchConfiguration('product').perform(context)
 
     nodes = []
 
-    # 1. VITURE Sensor Driver Layer
-    if mode in ['hardware', 'field_test', 'production']:
-        sim_mode_val = True if mode == 'field_test' else False
-        nodes.append(Node(
-            package='viture_driver',
-            executable='viture_driver_node',
-            name='viture_driver',
-            parameters=[{'sim_mode': sim_mode_val}]
-        ))
+    from viture_driver.product_capabilities import get_product_capability
+    capability = get_product_capability(product_val)
 
-    # 2. Reconstruction Backend Layer
-    if mode in ['field_test', 'production']:
-        if product_val == 'scanar_g':
+    # 1. Hardware Sensor Driver Layer
+    if mode in ['hardware', 'field_test', 'production']:
+        if capability.has_rgb_camera or "viture_driver" in capability.startup_services:
+            sim_mode_val = True if mode == 'field_test' else False
             nodes.append(Node(
-                package='lingbot_backend',
-                executable='lingbot_backend_node',
-                name='lingbot_backend',
-                parameters=[{'product': product_val}, {'sim_mode': sim_mode_val}]
+                package='viture_driver',
+                executable='viture_driver_node',
+                name='viture_driver',
+                parameters=[{'sim_mode': sim_mode_val, 'product': product_val}]
             ))
-        else:
+
+    # 2. Capability-Driven Reconstruction Backend Layer
+    if mode in ['field_test', 'production']:
+        if capability.reconstruction_engine == 'lingbot' or 'lingbot_engine' in capability.startup_services:
             nodes.append(Node(
-                package='vigs_backend',
-                executable='vigs_backend_node',
-                name='vigs_backend'
+                package='lingbot_engine',
+                executable='lingbot_engine_node',
+                name='lingbot_engine',
+                parameters=[{'product': product_val}, {'sim_mode': sim_mode_val}]
             ))
 
     # 3. Capture and Session Layer

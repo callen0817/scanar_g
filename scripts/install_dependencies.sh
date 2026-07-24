@@ -36,8 +36,8 @@ else
     echo "Repository already exists at $TARGET_SRC."
 fi
 
-echo "Installing lingbot-map in editable development mode..."
-pip3 install -e "$TARGET_SRC"
+echo "Installing lingbot-map package..."
+pip3 install "$TARGET_SRC"
 
 # 5. Run Verification
 echo "[-] Verification check..."

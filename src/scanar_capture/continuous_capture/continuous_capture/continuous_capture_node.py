@@ -5,6 +5,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, Imu
 from std_msgs.msg import String
 from cv_bridge import CvBridge
+from rclpy.qos import qos_profile_sensor_data
 import cv2
 import os
 import json
@@ -29,8 +30,8 @@ class ContinuousCaptureNode(Node):
         self.imu_writer = None
 
         # Subscriptions
-        self.odom_sub = self.create_subscription(Odometry, '/fast_lio/odometry', self.handle_odom, 10)
-        self.img_sub = self.create_subscription(Image, '/viture/camera/image_raw', self.handle_image, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/scanar/odometry', self.handle_odom, 10)
+        self.img_sub = self.create_subscription(Image, '/viture/camera/image_raw', self.handle_image, qos_profile_sensor_data)
         self.imu_sub = self.create_subscription(Imu, '/viture/imu', self.handle_imu, 10)
         self.dir_sub = self.create_subscription(String, '/scanar/session/active_directory', self.handle_active_directory, 10)
         
@@ -61,13 +62,16 @@ class ContinuousCaptureNode(Node):
             return
 
         try:
-            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            import numpy as np
+            cv_img = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
             rgb_dir = os.path.join(self.active_dir, "rgb")
+            os.makedirs(rgb_dir, exist_ok=True)
             img_name = f"frame_{self.frame_idx:05d}.jpg"
             img_path = os.path.join(rgb_dir, img_name)
             cv2.imwrite(img_path, cv_img)
             self.frame_idx += 1
         except Exception as e:
+            self.get_logger().error(f"Failed to write image: {e}")
             self.get_logger().error(f"Failed to record frame: {e}")
 
     def handle_imu(self, msg):

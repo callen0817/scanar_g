@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'lingbot_backend'
+package_name = 'lingbot_engine'
 
 setup(
     name=package_name,
@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='scanarstereo',
     maintainer_email='callen0817@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='ScanAR G LingBot Tracking Engine Node',
+    license='Proprietary',
     extras_require={
         'test': [
             'pytest',
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'lingbot_backend_node = lingbot_backend.lingbot_backend_node:main',
+            'lingbot_engine_node = lingbot_engine.lingbot_engine_node:main',
         ],
     },
 )

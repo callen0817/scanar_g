@@ -7,6 +7,7 @@ install(PROGRAMS
   src/hud_overlay.py
   src/hud_renderer.py
   src/hud_state_manager.py
+  src/product_capabilities.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

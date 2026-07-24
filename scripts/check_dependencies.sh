@@ -1,4 +1,3 @@
-#!/usr/bin/env block
 #!/bin/bash
 
 # Get directory of current script
