@@ -41,9 +41,9 @@ def launch_setup(context, *args, **kwargs):
                 parameters=[{'video_device': '/dev/sensors/camera_elp', 'width': 1920, 'height': 1080, 'fps': 30.0}]
             ))
 
-    # 2. Capability-Driven Reconstruction Backend Layer
+    # 2. Profile-Driven Reconstruction / SLAM Engine Layer
     if mode in ['field_test', 'production']:
-        if capability.reconstruction_engine == 'lingbot' or 'lingbot_engine' in capability.startup_services:
+        if profile.slam_engine in ['lingbot', 'lingbot_map'] or 'lingbot_engine' in profile.hardware_drivers:
             nodes.append(Node(
                 package='lingbot_engine',
                 executable='lingbot_engine_node',

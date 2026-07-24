@@ -499,9 +499,9 @@ class HudRenderer(Node):
         # PIP & Overlay Toggle Buttons + Configuration Cycle Button on Top Bar
         toggle_buttons = [
             ("eng", "[E] ENG", 300, 75, self.show_eng),
-            ("map", "[M] MAP", 385, 85, self.show_slam_pip),
-            ("rgb", "[C] RGB", 480, 80, self.show_rgb_pip and self.capability.has_rgb_camera),
-            ("pose", "[P] POSE", 570, 85, self.show_pose_pip),
+            ("map", "[M] MAP", 385, 85, self.show_slam_pip and self.profile.supports_view("map")),
+            ("rgb", "[C] RGB", 480, 80, self.show_rgb_pip and self.profile.supports_view("rgb")),
+            ("pose", "[P] POSE", 570, 85, self.show_pose_pip and self.profile.supports_view("pose")),
             ("cfg", f"[K] CFG: {config_name}", 665, 160, True),
         ]
 

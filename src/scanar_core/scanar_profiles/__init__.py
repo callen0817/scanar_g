@@ -1,17 +1,17 @@
 """
 scanar_profiles package
 =======================
-Central registry of hardware-agnostic product profiles for ScanAR.
+Central registry of validated hardware configuration profiles for ScanAR products.
 """
 
-from .base_profile import ScanARProfile
-from .scanar_g import SCANAR_G_PROFILE
-from .scanar_c import SCANAR_C_PROFILE
-from .scanar_s import SCANAR_S_PROFILE
-from .scanar_s2 import SCANAR_S2_PROFILE
-from .scanar_l import SCANAR_L_PROFILE
-from .scanar_l2 import SCANAR_L2_PROFILE
-from .scanar_pro import SCANAR_PRO_PROFILE
+from scanar_profiles.base_profile import ScanARProfile
+from scanar_profiles.profiles.scanar_g.profile import SCANAR_G_PROFILE
+from scanar_profiles.profiles.scanar_c.profile import SCANAR_C_PROFILE
+from scanar_profiles.profiles.scanar_s.profile import SCANAR_S_PROFILE
+from scanar_profiles.profiles.scanar_s2.profile import SCANAR_S2_PROFILE
+from scanar_profiles.profiles.scanar_l.profile import SCANAR_L_PROFILE
+from scanar_profiles.profiles.scanar_l2.profile import SCANAR_L2_PROFILE
+from scanar_profiles.profiles.scanar_pro.profile import SCANAR_PRO_PROFILE
 
 SCANAR_PROFILES = {
     "scanar_g": SCANAR_G_PROFILE,
