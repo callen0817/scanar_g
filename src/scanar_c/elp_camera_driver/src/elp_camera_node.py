@@ -2,14 +2,21 @@
 """
 elp_camera_node.py — Production ELP 5MP Global Shutter USB Camera ROS 2 Driver
 ================================================================================
-Hardware Driver for ELP 5MP Global Shutter USB Camera (ScanAR C Configuration).
-Replaces rolling shutter glasses camera with high-frame-rate, zero-distortion global shutter acquisition.
-Publishes low-latency RGB/Mono frames to ROS 2 topic /viture/camera/image_raw and /elp/camera/image_raw.
+Hardware Driver for ELP 5MP Global Shutter USB Camera (Model: ELP-USBGS5MP01-L170).
+Used in ScanAR C product profile for high-speed, zero-motion-blur 3D reconstruction.
+
+Key Parameters:
+- Format: MJPEG
+- Resolution: 1920x1080 (or 1280x720)
+- Target Frame Rate: 30.0 FPS / 60.0 FPS
+- Device Binding: /dev/sensors/camera_elp symlink with dynamic /dev/video* fallback search.
+- Exposure & WB: Manual Exposure, Manual White Balance, Fixed Focus.
 """
 
 import os
 import sys
 import time
+import glob
 import cv2
 import numpy as np
 
@@ -17,26 +24,23 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge
 
 class ELPCameraNode(Node):
     def __init__(self):
         super().__init__('elp_camera_node')
 
         # Parameters
-        self.declare_parameter('video_device', '/dev/video0')
-        self.declare_parameter('width', 1280)
-        self.declare_parameter('height', 720)
-        self.declare_parameter('fps', 60.0)
+        self.declare_parameter('video_device', '/dev/sensors/camera_elp')
+        self.declare_parameter('width', 1920)
+        self.declare_parameter('height', 1080)
+        self.declare_parameter('fps', 30.0)
         self.declare_parameter('frame_id', 'elp_camera_optical_frame')
 
-        self.video_device = self.get_parameter('video_device').get_parameter_value().string_value
+        self.video_device_param = self.get_parameter('video_device').get_parameter_value().string_value
         self.width = self.get_parameter('width').get_parameter_value().integer_value
         self.height = self.get_parameter('height').get_parameter_value().integer_value
         self.fps = self.get_parameter('fps').get_parameter_value().double_value
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
-
-        self.bridge = CvBridge()
 
         # Low-latency QoS profile (Depth 1, Best Effort)
         sensor_qos = QoSProfile(
@@ -50,20 +54,15 @@ class ELPCameraNode(Node):
         self.pub_elp_image = self.create_publisher(Image, '/elp/camera/image_raw', sensor_qos)
         self.pub_info = self.create_publisher(CameraInfo, '/elp/camera/camera_info', sensor_qos)
 
-        # Initialize V4L2 capture
-        dev_idx = 0
-        if self.video_device.startswith('/dev/video'):
-            try:
-                dev_idx = int(self.video_device.replace('/dev/video', ''))
-            except ValueError:
-                dev_idx = 0
+        # Find camera device
+        active_device, dev_idx = self._find_camera_device()
+        self.get_logger().info(f"[ELP Camera Driver] Opening ELP 5MP Global Shutter Camera on {active_device} (Index {dev_idx})...")
 
-        self.get_logger().info(f"Initializing ELP 5MP Global Shutter Camera on {self.video_device} ({self.width}x{self.height} @ {self.fps:.0f} FPS)...")
         self.cap = cv2.VideoCapture(dev_idx, cv2.CAP_V4L2)
 
         if not self.cap.isOpened():
-            self.get_logger().error(f"Failed to open V4L2 camera device {self.video_device}! Retrying with default backend...")
-            self.cap = cv2.VideoCapture(dev_idx)
+            self.get_logger().error(f"[ELP Camera Driver] Failed to open {active_device}! Trying index 1 fallback...")
+            self.cap = cv2.VideoCapture(1, cv2.CAP_V4L2)
 
         # Configure hardware V4L2 properties for ELP Global Shutter camera
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -71,37 +70,84 @@ class ELPCameraNode(Node):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FPS, self.fps)
 
+        # Set manual exposure & white balance if supported by hardware driver
+        try:
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1) # 1 = Manual Exposure
+            self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)       # 0 = Manual White Balance
+        except Exception:
+            pass
+
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS))
 
-        self.get_logger().info(f"ELP Global Shutter Hardware Stream Active: {actual_w}x{actual_h} @ {actual_fps:.1f} FPS")
+        self.get_logger().info(f"[ELP Camera Driver] ELP Global Shutter Stream Active: {actual_w}x{actual_h} @ {actual_fps:.1f} FPS (MJPEG)")
 
-        # Timer for frame polling loop at 60 Hz
+        # Polling timer at max frame rate
         timer_period = 1.0 / max(10.0, self.fps)
         self.timer = self.create_timer(timer_period, self._poll_frame)
 
+    def _find_camera_device(self):
+        # 1. Try persistent udev symlink if present
+        if os.path.exists(self.video_device_param):
+            real_path = os.path.realpath(self.video_device_param)
+            try:
+                dev_idx = int(real_path.replace('/dev/video', ''))
+                return self.video_device_param, dev_idx
+            except ValueError:
+                pass
+
+        # 2. Search available /dev/video* devices
+        video_devs = sorted(glob.glob('/dev/video*'))
+        for dev_path in video_devs:
+            try:
+                idx = int(dev_path.replace('/dev/video', ''))
+                test_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+                if test_cap.isOpened():
+                    ret, frame = test_cap.read()
+                    test_cap.release()
+                    if ret and frame is not None:
+                        self.get_logger().info(f"[ELP Camera Driver] Detected active video device at {dev_path} (Index {idx})")
+                        return dev_path, idx
+            except Exception:
+                continue
+
+        # Fallback to index 1 or 0
+        return '/dev/video1', 1
+
     def _poll_frame(self):
-        if not self.cap.isOpened():
+        if not hasattr(self, 'cap') or self.cap is None or not self.cap.isOpened():
             return
 
         ret, frame = self.cap.read()
         if not ret or frame is None:
-            self.get_logger().warn("ELP Camera frame capture missed, retrying...")
             return
 
         now = self.get_clock().now().to_msg()
 
         try:
-            msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            if len(frame.shape) == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            elif len(frame.shape) == 3 and frame.shape[2] == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_YUY2)
+            elif len(frame.shape) == 3 and frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+            msg = Image()
             msg.header.stamp = now
             msg.header.frame_id = self.frame_id
+            msg.height = frame.shape[0]
+            msg.width = frame.shape[1]
+            msg.encoding = "bgr8"
+            msg.is_bigendian = 0
+            msg.step = frame.shape[1] * 3
+            msg.data = frame.tobytes()
 
-            # Publish to both primary camera topic and ELP specific topic
+            # Publish to primary camera topic and ELP specific topic
             self.pub_image.publish(msg)
             self.pub_elp_image.publish(msg)
         except Exception as e:
-            self.get_logger().error(f"Error publishing ELP camera frame: {e}")
+            self.get_logger().error(f"[ELP Camera Driver] Error publishing frame: {type(e).__name__} - {e}")
 
     def destroy_node(self):
         if hasattr(self, 'cap') and self.cap is not None:

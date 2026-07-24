@@ -160,6 +160,10 @@ class LingBotBackendNode(Node):
         else:
             self.get_logger().warn("[LingBot-Map] Running in Simulation/Development mode. Bypassing production dependency requirements.")
 
+        # Product configuration parameter
+        self.declare_parameter('product', 'scanar_g')
+        self.product = self.get_parameter('product').get_parameter_value().string_value
+
         # Camera intrinsics
         self.fx = 960.0
         self.fy = 960.0
@@ -172,9 +176,11 @@ class LingBotBackendNode(Node):
         self.status_pub = self.create_publisher(String, '/vigs/status', 10)
         self.conf_pub = self.create_publisher(Float32, '/scanar/scan_confidence', 10)
 
-        # Subscribers
-        self.create_subscription(Image, '/viture/camera/image_raw', self.handle_image, qos_profile_sensor_data)
+        # Subscribers (ScanAR G -> /viture/camera/image_raw, ScanAR C -> /elp/camera/image_raw)
+        camera_topic = '/elp/camera/image_raw' if self.product == 'scanar_c' else '/viture/camera/image_raw'
+        self.create_subscription(Image, camera_topic, self.handle_image, qos_profile_sensor_data)
         self.create_subscription(String, '/scanar/session/active_directory', self.handle_active_directory, 10)
+        self.get_logger().info(f"[LingBot-Map] Subscribed to camera topic: {camera_topic} for product profile: {self.product}")
 
         # Periodic status publisher
         self.create_timer(1.0, self.publish_status)

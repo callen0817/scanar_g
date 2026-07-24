@@ -170,12 +170,21 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
         row("ENGINE", "lingbot_map", C_GREEN)
         row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
         row("RECON POINTS", f"{stats_db.get('active_splats', 0)} pts", C_CYAN)
-    else:
-        row("ENGINE", "vigs_slam" if "scanar_s" in profile_name else "fast_lio2", C_GREEN)
+    elif profile_name in ("scanar_s", "scanar_s2"):
+        row("ENGINE", "vins_fusion", C_GREEN)
         row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
         row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("SPLAT GROWTH", f"+{stats_db.get('new_splats_per_sec', 0)} /s", C_CYAN)
-        row("ACTIVE / PRUNED", f"{stats_db.get('active_splats', 0)} / {stats_db.get('pruned_splats', 0)}", C_CYAN)
+        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
+    elif profile_name == "scanar_pro":
+        row("ENGINE", "fast_livo2", C_GREEN)
+        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
+        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
+    else:
+        row("ENGINE", "fast_lio2", C_GREEN)
+        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
+        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
 
     row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_CYAN)
 
@@ -256,8 +265,9 @@ class HudRenderer(Node):
         # ROS 2 Command Publisher
         self.pub_cmd = self.create_publisher(String, '/scanar/session/command', 10)
 
-        # ROS subscriptions
-        self.create_subscription(Image, '/viture/camera/image_raw', self._cb_image, cam_qos)
+        # ROS subscriptions (ScanAR G -> /viture/camera/image_raw, ScanAR C -> /elp/camera/image_raw)
+        camera_topic = '/elp/camera/image_raw' if self.product == 'scanar_c' else '/viture/camera/image_raw'
+        self.sub_cam = self.create_subscription(Image, camera_topic, self._cb_image, cam_qos)
         self.create_subscription(Imu, '/viture/imu', self._cb_imu_data, qos_profile_sensor_data)
         self.create_subscription(Odometry, '/scanar/odometry', self._cb_odom, 10)
         self.create_subscription(ReconstructionFrame, '/scanar/reconstruction', self._cb_reconstruction, 10)
@@ -274,14 +284,23 @@ class HudRenderer(Node):
         self.get_logger().info("ScanAR G V1.5 HUD Renderer Node Initialized (Pass-Through AR Mode + PIP Stack).")
 
     def cycle_product_config(self):
-        configs = ["scanar_g", "scanar_c", "scanar_s", "scanar_l", "scanar_l2", "scanar_pro"]
+        configs = ["scanar_g", "scanar_c", "scanar_s", "scanar_s2", "scanar_l", "scanar_l2", "scanar_pro"]
         curr_idx = configs.index(self.product) if self.product in configs else 0
         next_idx = (curr_idx + 1) % len(configs)
         self.product = configs[next_idx]
         self.capability = get_product_capability(self.product)
+
+        if hasattr(self, 'sub_cam') and self.sub_cam is not None:
+            self.destroy_subscription(self.sub_cam)
+        cam_topic = '/elp/camera/image_raw' if self.product == 'scanar_c' else '/viture/camera/image_raw'
+        cam_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST)
+        self.sub_cam = self.create_subscription(Image, cam_topic, self._cb_image, cam_qos)
+
+        self.camera_image = None
+        self.pip_image = None
         self._last_click_msg = f"CONFIGURATION SWITCHED TO: {self.capability.name.upper()}"
         self._last_click_t = time.time()
-        self.get_logger().info(f"Product configuration switched via HUD -> {self.capability.name}")
+        self.get_logger().info(f"Product configuration switched via HUD -> {self.capability.name} ({cam_topic})")
 
     def trigger_action(self, action_id: str):
         msg = String()
