@@ -132,20 +132,7 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
                     FONT, 0.34, col, 1, cv2.LINE_AA)
         y += 26
 
-    profile_label = "SCANAR G (GLASSES)"
-    if profile_name == "scanar_c":
-        profile_label = "SCANAR C (GLOBAL SHUTTER)"
-    elif profile_name == "scanar_s":
-        profile_label = "SCANAR S (STEREO)"
-    elif profile_name == "scanar_s2":
-        profile_label = "SCANAR S2"
-    elif profile_name == "scanar_l":
-        profile_label = "SCANAR L"
-    elif profile_name == "scanar_l2":
-        profile_label = "SCANAR L2"
-    elif profile_name == "scanar_pro":
-        profile_label = "SCANAR PRO"
-
+    profile_label = self.profile.name.upper()
     row("PROFILE", profile_label, C_CYAN)
     y += 4
 
@@ -166,26 +153,9 @@ def _draw_engineering(frame, cpu, ram, temp, lat_ms, confidence, stats_db, dropp
     bar("",           temp, 100,       tmp_c)
 
     y += 4
-    if profile_name in ("scanar_g", "scanar_c"):
-        row("ENGINE", "lingbot_map", C_GREEN)
-        row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("RECON POINTS", f"{stats_db.get('active_splats', 0)} pts", C_CYAN)
-    elif profile_name in ("scanar_s", "scanar_s2"):
-        row("ENGINE", "vins_fusion", C_GREEN)
-        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
-        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
-    elif profile_name == "scanar_pro":
-        row("ENGINE", "fast_livo2", C_GREEN)
-        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
-        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
-    else:
-        row("ENGINE", "fast_lio2", C_GREEN)
-        row("CUDA LATENCY", f"{stats_db.get('cuda_latency_ms', 0.0):.2f} ms", C_GREEN)
-        row("OPT RATE",     f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
-        row("ACTIVE POINTS", f"{stats_db.get('active_splats', 0)}", C_CYAN)
-
+    row("ENGINE", self.profile.reconstruction_engine, C_GREEN)
+    row("MAP UPDATE", f"{stats_db.get('optimization_fps', 0.0):.1f} Hz", C_CYAN)
+    row("RECON POINTS", f"{stats_db.get('active_splats', 0)} pts", C_CYAN)
     row("DROPPED FRAMES", f"{dropped_f}", C_RED if dropped_f > 10 else C_CYAN)
 
 class HudRenderer(Node):
@@ -250,10 +220,11 @@ class HudRenderer(Node):
         self.camera_image = None
         self.pip_image = None
 
-        # Declare and get product parameter & capability
+        # Declare and get product parameter & capability profile
         self.declare_parameter('product', 'scanar_g')
         self.product = self.get_parameter('product').get_parameter_value().string_value
-        self.capability = get_product_capability(self.product)
+        self.profile = get_product_capability(self.product)
+        self.capability = self.profile
 
         # Low-latency camera QoS profile (Depth 1, Keep Last, Best Effort)
         cam_qos = QoSProfile(
@@ -265,9 +236,11 @@ class HudRenderer(Node):
         # ROS 2 Command Publisher
         self.pub_cmd = self.create_publisher(String, '/scanar/session/command', 10)
 
-        # ROS subscriptions (ScanAR G -> /viture/camera/image_raw, ScanAR C -> /elp/camera/image_raw)
-        camera_topic = '/elp/camera/image_raw' if self.product == 'scanar_c' else '/viture/camera/image_raw'
-        self.sub_cam = self.create_subscription(Image, camera_topic, self._cb_image, cam_qos)
+        # ROS subscriptions derived directly from profile plugin
+        if self.profile.camera_topic:
+            self.sub_cam = self.create_subscription(Image, self.profile.camera_topic, self._cb_image, cam_qos)
+        else:
+            self.sub_cam = None
         self.create_subscription(Imu, '/viture/imu', self._cb_imu_data, qos_profile_sensor_data)
         self.create_subscription(Odometry, '/scanar/odometry', self._cb_odom, 10)
         self.create_subscription(ReconstructionFrame, '/scanar/reconstruction', self._cb_reconstruction, 10)
@@ -288,19 +261,22 @@ class HudRenderer(Node):
         curr_idx = configs.index(self.product) if self.product in configs else 0
         next_idx = (curr_idx + 1) % len(configs)
         self.product = configs[next_idx]
-        self.capability = get_product_capability(self.product)
+        self.profile = get_product_capability(self.product)
+        self.capability = self.profile
 
         if hasattr(self, 'sub_cam') and self.sub_cam is not None:
             self.destroy_subscription(self.sub_cam)
-        cam_topic = '/elp/camera/image_raw' if self.product == 'scanar_c' else '/viture/camera/image_raw'
-        cam_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST)
-        self.sub_cam = self.create_subscription(Image, cam_topic, self._cb_image, cam_qos)
+            self.sub_cam = None
+
+        if self.profile.camera_topic:
+            cam_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST)
+            self.sub_cam = self.create_subscription(Image, self.profile.camera_topic, self._cb_image, cam_qos)
 
         self.camera_image = None
         self.pip_image = None
-        self._last_click_msg = f"CONFIGURATION SWITCHED TO: {self.capability.name.upper()}"
+        self._last_click_msg = f"CONFIGURATION SWITCHED TO: {self.profile.name.upper()}"
         self._last_click_t = time.time()
-        self.get_logger().info(f"Product configuration switched via HUD -> {self.capability.name} ({cam_topic})")
+        self.get_logger().info(f"Product configuration switched via HUD -> {self.profile.name} ({self.profile.camera_topic})")
 
     def trigger_action(self, action_id: str):
         msg = String()

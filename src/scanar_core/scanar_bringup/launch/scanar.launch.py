@@ -16,18 +16,29 @@ def launch_setup(context, *args, **kwargs):
 
     nodes = []
 
-    from viture_driver.product_capabilities import get_product_capability
-    capability = get_product_capability(product_val)
+    import sys
+    profiles_dir = "/home/scanarstereo/scanAR_G/src/scanar_core"
+    if profiles_dir not in sys.path:
+        sys.path.append(profiles_dir)
+    from scanar_profiles import get_scanar_profile
+    profile = get_scanar_profile(product_val)
 
-    # 1. Hardware Sensor Driver Layer
+    # 1. Hardware Sensor Driver Layer derived directly from plugin profile
     if mode in ['hardware', 'field_test', 'production']:
-        if capability.has_rgb_camera or "viture_driver" in capability.startup_services:
-            sim_mode_val = True if mode == 'field_test' else False
+        sim_mode_val = True if mode == 'field_test' else False
+        if "viture_driver" in profile.hardware_drivers:
             nodes.append(Node(
                 package='viture_driver',
                 executable='viture_driver_node',
                 name='viture_driver',
                 parameters=[{'sim_mode': sim_mode_val, 'product': product_val}]
+            ))
+        elif "elp_camera_driver" in profile.hardware_drivers:
+            nodes.append(Node(
+                package='elp_camera_driver',
+                executable='elp_camera_node.py',
+                name='elp_camera_driver_node',
+                parameters=[{'video_device': '/dev/sensors/camera_elp', 'width': 1920, 'height': 1080, 'fps': 30.0}]
             ))
 
     # 2. Capability-Driven Reconstruction Backend Layer
