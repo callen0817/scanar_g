@@ -574,8 +574,8 @@ class HudRenderer(Node):
             cv2.putText(frame, "LIVE SLAM MAP PIP", (KP_X, pip_slam_y - 6), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
             self.keyplan.draw(frame, KP_X, pip_slam_y, KP_W, pip_slam_h)
 
-        # (B) Middle PIP: Live 60 FPS RGB Camera PIP Monitor
-        if self.show_rgb_pip and self.capability.has_rgb_camera:
+        # (B) Middle PIP: Live RGB Camera PIP Monitor
+        if self.show_rgb_pip and self.profile.supports_view("rgb"):
             pip_rgb_y = 320
             pip_rgb_h = 200
             cv2.putText(frame, "LIVE RGB STREAM (60 FPS)", (KP_X, pip_rgb_y - 6), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)

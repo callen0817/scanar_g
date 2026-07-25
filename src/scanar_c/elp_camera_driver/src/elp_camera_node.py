@@ -50,7 +50,6 @@ class ELPCameraNode(Node):
         )
 
         # Publishers
-        self.pub_image = self.create_publisher(Image, '/viture/camera/image_raw', sensor_qos)
         self.pub_elp_image = self.create_publisher(Image, '/elp/camera/image_raw', sensor_qos)
         self.pub_info = self.create_publisher(CameraInfo, '/elp/camera/camera_info', sensor_qos)
 
@@ -58,11 +57,11 @@ class ELPCameraNode(Node):
         active_device, dev_idx = self._find_camera_device()
         self.get_logger().info(f"[ELP Camera Driver] Opening ELP 5MP Global Shutter Camera on {active_device} (Index {dev_idx})...")
 
-        self.cap = cv2.VideoCapture(dev_idx, cv2.CAP_V4L2)
+        self.cap = cv2.VideoCapture(dev_idx)
 
         if not self.cap.isOpened():
             self.get_logger().error(f"[ELP Camera Driver] Failed to open {active_device}! Trying index 1 fallback...")
-            self.cap = cv2.VideoCapture(1, cv2.CAP_V4L2)
+            self.cap = cv2.VideoCapture(1)
 
         # Configure hardware V4L2 properties for ELP Global Shutter camera
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -143,8 +142,7 @@ class ELPCameraNode(Node):
             msg.step = frame.shape[1] * 3
             msg.data = frame.tobytes()
 
-            # Publish to primary camera topic and ELP specific topic
-            self.pub_image.publish(msg)
+            # Publish exclusively to ELP camera topic
             self.pub_elp_image.publish(msg)
         except Exception as e:
             self.get_logger().error(f"[ELP Camera Driver] Error publishing frame: {type(e).__name__} - {e}")

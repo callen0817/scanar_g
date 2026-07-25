@@ -26,10 +26,16 @@ class ScanARProfile:
     color_mode: str = "natural"                         # "natural" or "green"
     default_fps: float = 30.0                           # Camera / Sensor FPS
     resolution: Tuple[int, int] = (1920, 1080)          # Frame resolution (width, height)
+    production_locked: bool = False                     # Reference MVP production lock flag
 
     def supports_view(self, view_key: str) -> bool:
         """Check if UI view (rgb, pose, map, eng) is supported by this hardware profile."""
         return self.supported_views.get(view_key.lower(), False)
+
+    @property
+    def has_rgb_camera(self) -> bool:
+        """Property alias for RGB view support."""
+        return self.supports_view("rgb")
 
     def get_camera_topic(self) -> str:
         """Get primary ROS 2 camera image topic."""

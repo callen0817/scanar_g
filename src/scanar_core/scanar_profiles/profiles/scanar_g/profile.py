@@ -28,5 +28,6 @@ SCANAR_G_PROFILE = ScanARProfile(
     hardware_drivers=["viture_driver", "lingbot_engine", "viture_hud"],
     color_mode="natural",
     default_fps=30.0,
-    resolution=(1920, 1080)
+    resolution=(1920, 1080),
+    production_locked=True
 )
