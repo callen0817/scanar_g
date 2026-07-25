@@ -27,7 +27,16 @@ from sensor_msgs.msg import Image, CameraInfo
 
 class ELPCameraNode(Node):
     def __init__(self):
-        super().__init__('elp_camera_node')
+        super().__init__('elp_camera_driver_node')
+
+        # Single-Instance Process Lock
+        try:
+            import sys
+            sys.path.append('/home/scanarstereo/scanAR_G/src/scanar_core')
+            from scanar_profiles.process_lock import ProcessLock
+            self._lock = ProcessLock('camera')
+        except Exception as e:
+            self.get_logger().warn(f"[ELP Camera Driver] Lock warning: {e}")
 
         # Parameters
         self.declare_parameter('video_device', '/dev/sensors/camera_elp')

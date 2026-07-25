@@ -162,7 +162,16 @@ class HudRenderer(Node):
     def __init__(self):
         super().__init__('hud_renderer')
 
-        # HUD State variables
+        # Single-Instance Process Lock
+        try:
+            import sys
+            sys.path.append('/home/scanarstereo/scanAR_G/src/scanar_core')
+            from scanar_profiles.process_lock import ProcessLock
+            self._lock = ProcessLock('hud')
+        except Exception as e:
+            self.get_logger().warn(f"[HUD Renderer] Lock warning: {e}")
+
+        # Declare product profile parameters
         self.confidence = 95.0
         self.camera_fps = 30.0
         self.imu_rate_hz = 100.0

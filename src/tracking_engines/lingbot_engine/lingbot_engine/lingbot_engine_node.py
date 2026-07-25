@@ -17,7 +17,16 @@ from rclpy.qos import qos_profile_sensor_data
 
 class LingBotBackendNode(Node):
     def __init__(self):
-        super().__init__('lingbot_backend_node')
+        super().__init__('lingbot_engine_node')
+
+        # Single-Instance Process Lock
+        try:
+            import sys
+            sys.path.append('/home/scanarstereo/scanAR_G/src/scanar_core')
+            from scanar_profiles.process_lock import ProcessLock
+            self._lock = ProcessLock('lingbot')
+        except Exception as e:
+            self.get_logger().warn(f"[LingBot-Map Engine] Lock warning: {e}")
 
         # Node parameters
         self.declare_parameter('cuda_enabled', True)
