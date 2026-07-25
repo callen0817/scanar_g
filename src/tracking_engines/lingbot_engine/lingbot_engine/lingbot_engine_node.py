@@ -37,7 +37,8 @@ class LingBotBackendNode(Node):
         # Initialize bridge
         self.bridge = CvBridge()
 
-        # Cache variables
+        # Cache variables & State flags
+        self.scan_active = False
         self.prev_gray = None
         self.prev_pts = None
         self.state_pos = np.array([0.0, 0.0, 0.0])

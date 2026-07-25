@@ -591,12 +591,14 @@ class HudRenderer(Node):
         if self.show_rgb_pip and self.profile.supports_view("rgb"):
             pip_rgb_y = 320
             pip_rgb_h = 200
-            cv2.putText(frame, "LIVE RGB STREAM (60 FPS)", (KP_X, pip_rgb_y - 6), FONT, 0.38, C_CYAN, 1, cv2.LINE_AA)
+            lbl_hdr = f"{self.profile.name.upper()} STREAM ({self.profile.camera_topic})"
+            cv2.putText(frame, lbl_hdr, (KP_X, pip_rgb_y - 6), FONT, 0.35, C_CYAN, 1, cv2.LINE_AA)
             if self.pip_image is not None and self.pip_image.shape[:2] == (pip_rgb_h, KP_W):
                 frame[pip_rgb_y:pip_rgb_y + pip_rgb_h, KP_X:KP_X + KP_W] = self.pip_image
             else:
                 cv2.rectangle(frame, (KP_X, pip_rgb_y), (KP_X + KP_W, pip_rgb_y + pip_rgb_h), (20, 20, 20), -1)
-                cv2.putText(frame, "NO RGB CAMERA FEED", (KP_X + 60, pip_rgb_y + 100), FONT, 0.42, C_DIM, 1, cv2.LINE_AA)
+                no_feed_txt = f"NO FEED ON {self.profile.camera_topic}"
+                cv2.putText(frame, no_feed_txt, (KP_X + 15, pip_rgb_y + 100), FONT, 0.38, C_DIM, 1, cv2.LINE_AA)
             cv2.rectangle(frame, (KP_X, pip_rgb_y), (KP_X + KP_W, pip_rgb_y + pip_rgb_h), C_EDGE, 1)
 
         # (C) Bottom PIP: Pose & Trajectory HUD PIP
