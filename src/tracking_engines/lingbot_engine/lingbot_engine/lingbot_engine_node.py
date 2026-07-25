@@ -207,11 +207,24 @@ class LingBotBackendNode(Node):
         msg = String()
         if self.sim_mode:
             msg.data = "LingBot-Map (Simulation)"
-        else:
-            msg.data = "LingBot-Map (Active)"
-        self.status_pub.publish(msg)
+        # Recording & SLAM Active State Flag
+        self.scan_active = False
+        self.create_subscription(String, '/scanar/session/command', self._cb_session_command, 10)
+
+    def _cb_session_command(self, msg: String):
+        cmd = msg.data.lower().strip()
+        if cmd in ("start", "rec", "toggle_record"):
+            self.scan_active = True
+            self.get_logger().info("[LingBot-Map] SLAM Neural Inference Engine ACTIVATED by User Command.")
+        elif cmd in ("stop", "reset"):
+            self.scan_active = False
+            self.get_logger().info("[LingBot-Map] SLAM Neural Inference Engine DEACTIVATED / IDLE.")
 
     def handle_image(self, msg: Image):
+        # IDLE Gate: Do not run heavy GPU neural inference unless user clicks START SCAN / RECORD
+        if not self.scan_active:
+            return
+
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:

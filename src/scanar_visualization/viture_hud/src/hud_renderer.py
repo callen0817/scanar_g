@@ -36,7 +36,11 @@ from cv_bridge import CvBridge
 
 from hud_widgets.keyplan import KeyplanWidget
 try:
-    from viture_hud.product_capabilities import get_product_capability
+    import sys
+    profiles_dir = "/home/scanarstereo/scanAR_G/src/scanar_core"
+    if profiles_dir not in sys.path:
+        sys.path.append(profiles_dir)
+    from scanar_profiles import get_scanar_profile
 except ImportError:
     from product_capabilities import get_product_capability
 
@@ -232,7 +236,7 @@ class HudRenderer(Node):
         # Declare and get product parameter & capability profile
         self.declare_parameter('product', 'scanar_g')
         self.product = self.get_parameter('product').get_parameter_value().string_value
-        self.profile = get_product_capability(self.product)
+        self.profile = get_scanar_profile(self.product)
         self.capability = self.profile
 
         # Low-latency camera QoS profile (Depth 1, Keep Last, Best Effort)
@@ -270,7 +274,7 @@ class HudRenderer(Node):
         curr_idx = configs.index(self.product) if self.product in configs else 0
         next_idx = (curr_idx + 1) % len(configs)
         self.product = configs[next_idx]
-        self.profile = get_product_capability(self.product)
+        self.profile = get_scanar_profile(self.product)
         self.capability = self.profile
 
         if hasattr(self, 'sub_cam') and self.sub_cam is not None:
